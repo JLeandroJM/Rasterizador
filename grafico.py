@@ -24,8 +24,14 @@ def main():
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
     ax.imshow(np.clip(imagen, 0, 1))
-    fig.savefig("resultado.png")
+    fig.savefig("resultado_orden.png")
     plt.show()
+
+
+
+
+
+    
 
 if __name__ == "__main__":
     main()

@@ -38,7 +38,14 @@ class Camara:
         matriz_vista[:3, 3] = traslacion
 
         return matriz_vista
-
-
-
     
+
+
+def crear_orbita_camara(punto_inicio , radio , angulo , altura , focal):
+
+    angulo_radian = np.deg2rad(angulo)
+    posicion = punto_inicio + np.array([radio * np.sin(angulo_radian), altura, radio * np.cos(angulo_radian)])
+
+    camara_final = Camara(posicion = posicion,punto_mira = punto_inicio,
+                          arriba = np.array([0.0, 1.0, 0.0]), focal = focal , size = (512, 512))
+    return camara_final
