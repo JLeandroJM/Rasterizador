@@ -310,7 +310,7 @@ def main():
 
     for idx , camara_c in enumerate(camaras):
 
-        # convertimos el campo de vision (grados) a focal en pixeles
+        # convertimos el campo de vision de grafos a focal en pixeles
         fov_rad = np.deg2rad(camara_c["campo_vision"])
         focal = (ancho / 2.0) / np.tan(fov_rad / 2.0)
 
