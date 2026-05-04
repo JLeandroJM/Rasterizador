@@ -202,3 +202,13 @@ LRS_DEFAULT = {
     'opacity': 5e-2,
     'color':   1e-2,
 }
+
+
+# NUEVO: clamp de scale_raw despues del optimizer.step() para que ninguna
+# gaussiana se vuelva mas grande que la imagen. Sin esto, el optimizer
+# puede crecer la escala sin limite -> Σ huge -> exp/inv inestable -> NaN.
+@torch.no_grad()
+def clampear_escala(modelo, alto, ancho):
+    log_max = float(np.log(max(alto, ancho)))   # max ~ tamano de la imagen
+    log_min = float(np.log(0.5))                # min ~ medio pixel
+    modelo.scale_raw.data.clamp_(min=log_min, max=log_max)

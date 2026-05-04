@@ -70,7 +70,7 @@ def main():
     asegurar_carpeta(salida)
 
     # NUEVO: usamos el output del rasterizador 2d numpy como target
-    ruta_target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resultado_orden.png")
+    ruta_target = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".", "bolas1.jpg")
     alto, ancho = 128, 128
     target = cargar_imagen_target(ruta_target, alto, ancho, device)
     guardar_imagen(target, os.path.join(salida, "target.png"))

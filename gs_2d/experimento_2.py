@@ -21,8 +21,10 @@ from densificacion import (
 from utilidades import (
     obtener_dispositivo,
     cargar_imagen_target,
+    inicializar_gaussianas_aleatorias,
     calcular_loss,
     crear_optimizador,
+    clampear_escala,
     asegurar_carpeta,
     guardar_imagen,
     guardar_curva,
@@ -58,11 +60,20 @@ def main():
     iteraciones = 3000
     densify_interval = 100
     densify_inicio = 200
-    grad_threshold = 0.0002
+    # NUEVO: threshold ajustado a coordenadas en pixeles (no normalizadas).
+    # En el paper 3DGS μ vive en (-1, 1) y usan 2e-4. Aca μ vive en pixeles
+    # (0-128), entonces ‖∇μ‖ es mas chico (~1e-6 a 1e-5) y necesitamos
+    # un threshold mucho mas bajo.
+    grad_threshold = 1e-6
     max_gaussians = 200
 
-    # NUEVO: arrancamos con UNA sola gaussiana
-    mu, sr, th, op, co, dp = gaussiana_inicial_central(alto, ancho, device, escala_inicial=20.0)
+    # NUEVO: arrancar con N=1 estricto cae en plateau muy plano (gradiente ~0
+    # despues del primer clone). Arrancamos con N_inicial chico (10-15) para
+    # tener suficiente senal de gradiente y poder crecer.
+    N_inicial = 15
+    mu, sr, th, op, co, dp = inicializar_gaussianas_aleatorias(
+        N_inicial, alto, ancho, device, escala_inicial=15.0, semilla=0
+    )
     modelo = Gaussianas_2d_Torch(mu, sr, th, op, co, dp)
     optimizador = crear_optimizador(modelo, LRS_DEFAULT)
 
@@ -82,6 +93,10 @@ def main():
         # NUEVO: acumulamos ‖∇μ‖ antes del step
         acumulador.acumular(modelo.mu.grad)
         optimizador.step()
+
+        # NUEVO: clamp de scale_raw para que ninguna gaussiana se vuelva mas
+        # grande que la imagen (sin esto: NaN en el render por overflow)
+        clampear_escala(modelo, alto, ancho)
 
         losses.append(float(loss.item()))
         n_gauss_historial.append(modelo.numero_gausianas())

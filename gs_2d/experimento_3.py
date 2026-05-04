@@ -22,8 +22,10 @@ from densificacion import (
 from utilidades import (
     obtener_dispositivo,
     cargar_imagen_target,
+    inicializar_gaussianas_aleatorias,
     calcular_loss,
     crear_optimizador,
+    clampear_escala,
     asegurar_carpeta,
     guardar_imagen,
     guardar_curva,
@@ -31,7 +33,6 @@ from utilidades import (
     crear_gif,
     LRS_DEFAULT,
 )
-from experimento_2 import gaussiana_inicial_central
 
 
 def main():
@@ -41,7 +42,7 @@ def main():
     salida = os.path.join(os.path.dirname(os.path.abspath(__file__)), "salidas_exp3")
     asegurar_carpeta(salida)
 
-    ruta_target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resultado_orden.png")
+    ruta_target = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".", "gatof.jpg")
     alto, ancho = 128, 128
     target = cargar_imagen_target(ruta_target, alto, ancho, device)
     guardar_imagen(target, os.path.join(salida, "target.png"))
@@ -49,14 +50,19 @@ def main():
     iteraciones = 3000
     densify_interval = 100
     densify_inicio = 200
-    grad_threshold = 0.0002
+    # NUEVO: threshold ajustado a coordenadas en pixeles (ver experimento_2).
+    grad_threshold = 1e-6
     max_gaussians = 500
 
     # NUEVO: el size_threshold separa "chica" (clone) de "grande" (split).
     # En 2D usamos un porcentaje del lado de la imagen.
     size_threshold = max(alto, ancho) * 0.05
 
-    mu, sr, th, op, co, dp = gaussiana_inicial_central(alto, ancho, device, escala_inicial=20.0)
+    # NUEVO: arrancar con N inicial chico aleatorio (ver experimento_2)
+    N_inicial = 15
+    mu, sr, th, op, co, dp = inicializar_gaussianas_aleatorias(
+        N_inicial, alto, ancho, device, escala_inicial=15.0, semilla=0
+    )
     modelo = Gaussianas_2d_Torch(mu, sr, th, op, co, dp)
     optimizador = crear_optimizador(modelo, LRS_DEFAULT)
 
@@ -78,6 +84,9 @@ def main():
 
         acumulador.acumular(modelo.mu.grad)
         optimizador.step()
+
+        # NUEVO: clamp de scale_raw para evitar gaussianas gigantes -> NaN
+        clampear_escala(modelo, alto, ancho)
 
         losses.append(float(loss.item()))
         n_gauss_historial.append(modelo.numero_gausianas())

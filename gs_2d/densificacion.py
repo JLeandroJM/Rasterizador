@@ -57,10 +57,18 @@ def concatenar(base, nuevos):
 
 # NUEVO: clone -> duplicar gaussianas chicas con gradiente alto.
 # Devolvemos los tensores nuevos a anadir.
+# Importante: en el paper 3DGS la copia se desplaza en la direccion del
+# gradiente de mu. Si la dejamos en la MISMA posicion exacta, las dos
+# gaussianas se superponen perfectamente y el gradiente se vuelve ~0
+# (mover una no cambia el render porque la otra cubre lo mismo) -> jamas
+# se separan. Para romper simetria agregamos un pequeno offset aleatorio.
 @torch.no_grad()
-def clonar(modelo, indices):
+def clonar(modelo, indices, offset_px=0.5):
+    mu_copia = modelo.mu[indices].clone()
+    perturbacion = (torch.rand_like(mu_copia) - 0.5) * 2.0 * offset_px
+    mu_copia = mu_copia + perturbacion
     return (
-        modelo.mu[indices].clone(),
+        mu_copia,
         modelo.scale_raw[indices].clone(),
         modelo.theta_raw[indices].clone(),
         modelo.opacity_raw[indices].clone(),

@@ -91,12 +91,17 @@ def rasterizar_diferenciable(modelo, alto, ancho):
     alpha = torch.clamp(alpha, max=0.99)
 
     # transmitancia exclusiva: T_i = Π_{j<i} (1 - α_j)
-    # la calculamos con cumprod desplazado
-    one_minus_alpha = 1.0 - alpha
-    T = torch.cat([
-        torch.ones_like(one_minus_alpha[:, :1]),
-        torch.cumprod(one_minus_alpha[:, :-1], dim=1)
+    # NUEVO: lo hacemos en log-space (cumsum de logs) en vez de cumprod.
+    # Razon: con N grande y α cercano a 0.99, cumprod subdesborda a 0 y
+    # su gradiente da 0/0 = NaN. exp(cumsum(log(...))) es estable: cuando
+    # T es muy chico el gradiente tambien lo es, sin NaN.
+    log_one_minus_alpha = torch.log(1.0 - alpha + 1e-10)
+    log_T_inclusivo = torch.cumsum(log_one_minus_alpha, dim=1)
+    log_T = torch.cat([
+        torch.zeros_like(log_T_inclusivo[:, :1]),
+        log_T_inclusivo[:, :-1]
     ], dim=1)
+    T = torch.exp(log_T)
 
     # contribucion de cada gaussiana: α * T * color
     pesos = (alpha * T).unsqueeze(-1)  # (P, N, 1)
