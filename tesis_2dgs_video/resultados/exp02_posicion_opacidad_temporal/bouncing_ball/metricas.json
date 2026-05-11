@@ -1,0 +1,20 @@
+{
+  "exp": "exp02_posicion_opacidad_temporal",
+  "clip": "bouncing_ball",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 200,
+  "q": 3,
+  "iteraciones": 3000,
+  "psnr_promedio": 24.73016028934055,
+  "ssim_promedio": 0.984427007039388,
+  "lpips_promedio": null,
+  "bytes_modelo": 15200,
+  "ratio_compresion": 1164.1263157894737,
+  "tiempo_entrenamiento_seg": 800.7505280971527,
+  "tiempo_total_seg": 811.2806091308594,
+  "gaussianas_promedio_vivas": 133.55555725097656
+}

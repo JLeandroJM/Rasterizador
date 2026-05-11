@@ -1,0 +1,9 @@
+{
+  "nombre": "swelling_blobs",
+  "num_frames": 90,
+  "fps": 30,
+  "resolucion": [
+    256,
+    256
+  ]
+}

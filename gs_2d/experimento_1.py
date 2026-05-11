@@ -1,54 +1,46 @@
-"""
-Experimento 1: conteo fijo de gaussianas (sin densificacion).
 
-Probamos N = 4, 10, 50, 200 y comparamos visualmente. La idea es ver desde
-que numero de gaussianas la imagen empieza a parecerse decentemente al target.
-"""
 import os
 import sys
 import time
 
 import torch
 
-# permitimos importar los modulos del mismo directorio
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 
 from gaussiana_2d_torch import Gaussianas_2d_Torch
 from rasterizador_torch import rasterizar_diferenciable
-from utilidades import (
-    obtener_dispositivo,
-    cargar_imagen_target,
-    inicializar_gaussianas_aleatorias,
-    calcular_loss,
-    crear_optimizador,
-    asegurar_carpeta,
-    guardar_imagen,
-    guardar_curva,
-    guardar_comparacion,
-    LRS_DEFAULT,
-)
+from utilidades import *
 
+PARAMETROS_DEFECTO = {
+    'centro':      1e-3 * 100,  
+    'escala':   5e-3,
+    'theta':   1e-3,
+    'opacidad': 5e-2,
+    'color':   1e-2,
+}
 
-# NUEVO: una sola corrida de entrenamiento con N fijo
-def entrenar_conteo_fijo(target, N, iteraciones, device, semilla=0, lrs=None):
+def entrenamiento(imagen_modelo, N, iteraciones, device, gaussianas_iniciales=0):
 
-    alto, ancho, _ = target.shape
+    alto, ancho, _ = imagen_modelo.shape
 
-    mu, sr, th, op, co, dp = inicializar_gaussianas_aleatorias(
-        N, alto, ancho, device, escala_inicial=max(alto, ancho) / 20.0, semilla=semilla
+    centro, escala, tetha, opacidad, color, profundidad = inicializar_gaussianas_aleatorias(
+        N, alto, ancho, device, escala_inicial=max(alto, ancho) / 20.0, gaussianas_iniciales=gaussianas_iniciales
     )
-    modelo = Gaussianas_2d_Torch(mu, sr, th, op, co, dp)
 
-    if lrs is None:
-        lrs = LRS_DEFAULT
+    modelo = Gaussianas_2d_Torch(centro, escala, tetha, opacidad, color, profundidad)
+
+    
+    lrs = PARAMETROS_DEFECTO
     optimizador = crear_optimizador(modelo, lrs)
 
     losses = []
+
     t0 = time.time()
     for it in range(iteraciones):
         optimizador.zero_grad()
+
         render = rasterizar_diferenciable(modelo, alto, ancho)
-        loss = calcular_loss(render, target)
+        loss = calcular_loss(render, imagen_modelo)
         loss.backward()
         optimizador.step()
         losses.append(float(loss.item()))
@@ -56,47 +48,57 @@ def entrenar_conteo_fijo(target, N, iteraciones, device, semilla=0, lrs=None):
         if (it + 1) % 200 == 0:
             print(f"  N={N:4d} it={it+1:4d} loss={loss.item():.4f}  ({time.time()-t0:.1f}s)")
 
-    # render final sin gradiente
+   
     with torch.no_grad():
         render_final = rasterizar_diferenciable(modelo, alto, ancho)
     return modelo, render_final, losses
 
 
 def main():
-    device = obtener_dispositivo()
-    print(f"dispositivo: {device}")
 
-    salida = os.path.join(os.path.dirname(os.path.abspath(__file__)), "salidas_exp1")
+    device = torch.device('mps')
+
+    salida = "salidas_exp1"
+
+    
     asegurar_carpeta(salida)
 
-    # NUEVO: usamos el output del rasterizador 2d numpy como target
-    ruta_target = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".", "bolas1.jpg")
-    alto, ancho = 128, 128
-    target = cargar_imagen_target(ruta_target, alto, ancho, device)
-    guardar_imagen(target, os.path.join(salida, "target.png"))
+    ruta_imagen_modelo = "./imagenes_prueba/gatof.jpg"
+    alto = 128
+    ancho = 128
+
+
+    img = Image.open(ruta_imagen_modelo).convert('RGB').resize((ancho, alto))
+    arr = np.array(img, dtype=np.float32) / 255.0
+    imagen_modelo = torch.from_numpy(arr).to(device)
+
+
+    arr = imagen_modelo.detach().clamp(0, 1).cpu().numpy()
+    arr_uint8 = (arr * 255).astype(np.uint8)
+    Image.fromarray(arr_uint8).save(os.path.join(salida, "esperado.png"))
 
     iteraciones = 2000
-    Ns = [4, 10, 50, 200]
+    Ns = [300]
 
     renders = []
     titulos = []
     losses_finales = []
 
     for N in Ns:
-        print(f"--- entrenando con N={N} ---")
-        modelo, render, losses = entrenar_conteo_fijo(target, N, iteraciones, device, semilla=N)
+        print(f"entrenando con N={N} ---------------")
+        modelo, render, losses = entrenamiento(imagen_modelo, N, iteraciones, device, gaussianas_iniciales=N)
 
         guardar_imagen(render, os.path.join(salida, f"render_N{N}.png"))
-        guardar_curva(losses, f"loss N={N}", "loss", os.path.join(salida, f"loss_N{N}.png"))
+        guardar_curva(losses, f"loss n_gaussianas={N}", "loss", os.path.join(salida, f"loss_N{N}.png"))
 
         renders.append(render)
         titulos.append(f"N={N}")
         losses_finales.append(losses[-1])
 
     # comparacion side-by-side
-    guardar_comparacion(target, renders, titulos, losses_finales,
+    guardar_comparacion(imagen_modelo, renders, titulos, losses_finales,
                         os.path.join(salida, "comparacion.png"))
-    print(f"listo. resultados en: {salida}")
+   
 
 
 if __name__ == "__main__":

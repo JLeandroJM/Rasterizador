@@ -1,0 +1,7 @@
+torch>=2.0
+numpy>=1.24
+pillow>=10.0
+matplotlib>=3.7
+imageio>=2.31
+# opcional para LPIPS (si no esta, se reporta None)
+# lpips>=0.1.4

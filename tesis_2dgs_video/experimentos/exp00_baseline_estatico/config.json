@@ -1,0 +1,17 @@
+{
+    "N": 200,
+    "iteraciones_por_frame": 500,
+    "lambda_dssim": 0.2,
+    "lrs": {
+        "centro":   0.1,
+        "escala":   0.005,
+        "theta":    0.001,
+        "opacidad": 0.05,
+        "color":    0.01
+    },
+    "escala_inicial": 6.0,
+    "alto": 256,
+    "ancho": 256,
+    "semilla": 42,
+    "clips": ["bouncing_ball", "drifting_circles", "rotating_shape", "fade_transition", "swelling_blobs"]
+}

@@ -1,0 +1,8 @@
+{
+    "ruta_exp05": "../../resultados/exp05_numero_gaussianas",
+    "N_objetivo": 200,
+    "dtypes": ["float32", "float16", "bfloat16", "int8"],
+    "clips": ["bouncing_ball", "drifting_circles", "rotating_shape", "fade_transition", "swelling_blobs"],
+    "alto": 256,
+    "ancho": 256
+}

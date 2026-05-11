@@ -1,0 +1,20 @@
+{
+  "codecs": [
+    "libx264",
+    "libx265"
+  ],
+  "crfs": [
+    18,
+    23,
+    28,
+    35
+  ],
+  "fps": 30,
+  "clips": [
+    "bouncing_ball",
+    "drifting_circles",
+    "rotating_shape",
+    "fade_transition",
+    "swelling_blobs"
+  ]
+}

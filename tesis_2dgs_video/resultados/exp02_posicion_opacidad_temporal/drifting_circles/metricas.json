@@ -1,0 +1,20 @@
+{
+  "exp": "exp02_posicion_opacidad_temporal",
+  "clip": "drifting_circles",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 200,
+  "q": 3,
+  "iteraciones": 3000,
+  "psnr_promedio": 17.762666045294868,
+  "ssim_promedio": 0.9283453914854262,
+  "lpips_promedio": null,
+  "bytes_modelo": 15200,
+  "ratio_compresion": 1164.1263157894737,
+  "tiempo_entrenamiento_seg": 846.5530188083649,
+  "tiempo_total_seg": 859.1925461292267,
+  "gaussianas_promedio_vivas": 84.07777404785156
+}

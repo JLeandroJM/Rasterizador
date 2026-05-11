@@ -1,0 +1,17 @@
+{
+  "exp": "exp00_baseline_estatico",
+  "clip": "bouncing_ball",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 30,
+  "iteraciones_por_frame": 30,
+  "psnr_promedio": 17.610361925760905,
+  "ssim_promedio": 0.19310766773091423,
+  "lpips_promedio": null,
+  "bytes_modelo": 108000,
+  "ratio_compresion": 163.84,
+  "tiempo_total_seg": 101.48892402648926
+}
