@@ -1,0 +1,19 @@
+{
+  "exp": "exp03_full_temporal",
+  "clip": "drifting_circles",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 200,
+  "q": 3,
+  "iteraciones": 3000,
+  "psnr_promedio": 17.795025422838,
+  "ssim_promedio": 0.9282640596230824,
+  "lpips_promedio": null,
+  "bytes_modelo": 29600,
+  "ratio_compresion": 597.7945945945946,
+  "tiempo_entrenamiento_seg": 774.389731168747,
+  "tiempo_total_seg": 785.0255010128021
+}

@@ -1,0 +1,19 @@
+{
+  "exp": "exp03_full_temporal",
+  "clip": "bouncing_ball",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 200,
+  "q": 3,
+  "iteraciones": 3000,
+  "psnr_promedio": 24.747100088331436,
+  "ssim_promedio": 0.9843689646985796,
+  "lpips_promedio": null,
+  "bytes_modelo": 29600,
+  "ratio_compresion": 597.7945945945946,
+  "tiempo_entrenamiento_seg": 721.875235080719,
+  "tiempo_total_seg": 731.9189569950104
+}

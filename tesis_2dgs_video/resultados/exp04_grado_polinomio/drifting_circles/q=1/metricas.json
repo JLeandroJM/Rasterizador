@@ -1,0 +1,19 @@
+{
+  "exp": "exp04_grado_polinomio",
+  "base": "exp02_posicion_opacidad_temporal",
+  "clip": "drifting_circles",
+  "num_frames": 90,
+  "resolucion": [
+    256,
+    256
+  ],
+  "N": 200,
+  "q": 1,
+  "iteraciones": 3000,
+  "psnr_promedio": 17.606713994344076,
+  "ssim_promedio": 0.928740225897895,
+  "lpips_promedio": null,
+  "bytes_modelo": 10400,
+  "ratio_compresion": 1701.4153846153847,
+  "tiempo_entrenamiento_seg": 884.7796909809113
+}

@@ -1,0 +1,85 @@
+{
+  "exp": "exp08_incremental_chebyshev",
+  "clip": "drifting_circles",
+  "n_frames": 12,
+  "resolucion": [
+    256,
+    256
+  ],
+  "config_usado": {
+    "n_gaussianas_inicial": 80,
+    "grados": {
+      "mu": 10,
+      "opacity": 10,
+      "color": 6,
+      "scale": 6,
+      "theta": 6,
+      "depth": 6
+    },
+    "lrs": {
+      "mu_a0": 0.001,
+      "mu_high": 0.0001,
+      "opacity_a0": 0.05,
+      "opacity_high": 0.005,
+      "color_a0": 0.01,
+      "color_high": 0.001,
+      "scale_a0": 0.005,
+      "scale_high": 0.0005,
+      "theta_a0": 0.005,
+      "theta_high": 0.0005,
+      "depth_a0": 0.005,
+      "depth_high": 0.0005
+    },
+    "modo_replay": "completo",
+    "K_replay": 10,
+    "M_iter_por_frame": 15,
+    "beta_smoothness": 1e-05,
+    "pesos_smoothness": {
+      "mu": 1.0,
+      "opacity": 0.5,
+      "color": 2.0,
+      "scale": 2.0,
+      "theta": 2.0,
+      "depth": 2.0
+    },
+    "umbral_pruning_post": 0.05,
+    "clip": "drifting_circles",
+    "max_frames": 12,
+    "escala_inicial_px": 5.0,
+    "lambda_dssim": 0.2,
+    "intervalo_log": 3,
+    "checkpoint_interval": 0,
+    "device": "auto"
+  },
+  "tiempo_entrenamiento_seg": 87.09153580665588,
+  "pre_pruning": {
+    "N": 80,
+    "psnr": 19.63765573501587,
+    "ssim": 0.860287681221962,
+    "lpips": null,
+    "bytes_modelo": 26240,
+    "ratio_compresion": 89.91219512195121
+  },
+  "post_pruning": {
+    "N": 80,
+    "psnr": 19.63765573501587,
+    "ssim": 0.860287681221962,
+    "lpips": null,
+    "bytes_modelo": 26240,
+    "ratio_compresion": 89.91219512195121
+  },
+  "psnr_frame0_evolucion": [
+    15.77028751373291,
+    16.316360473632812,
+    16.813356399536133,
+    17.307022094726562,
+    17.8092041015625,
+    18.382381439208984,
+    19.047929763793945,
+    19.62700653076172,
+    20.046646118164062,
+    20.256502151489258,
+    20.31035614013672,
+    20.289688110351562
+  ]
+}
