@@ -1,6 +1,13 @@
 {
     "nombre_experimento": "exp09_monomial",
     "base": "monomial",
+
+    "video_mp4": null,
+    "n_frames_extraer": null,
+    "fps_extraccion": null,
+    "resolucion_extraccion": [256, 256],
+    "forzar_extraccion": false,
+
     "clip": "drifting_circles",
     "n_gaussianas_inicial": 1000,
     "grados": {

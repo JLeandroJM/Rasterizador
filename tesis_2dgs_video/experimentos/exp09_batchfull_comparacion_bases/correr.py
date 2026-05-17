@@ -24,6 +24,7 @@ from rasterizador import rasterizar_un_frame
 from optimizador import construir_optimizador
 from trainer import entrenar_batch_full
 from pruning_post import prunear_post
+from preparar_video import extraer_frames_de_video
 from metricas_calidad import reporte_completo
 from metricas_compresion import reporte_compresion
 from visualizar_trayectorias import (
@@ -104,11 +105,44 @@ def main():
     print(f"dispositivo: {device}", flush=True)
     print(f"base: {config['base']}", flush=True)
 
-    # === carga clip =========================================================
+    # === preparar clip ======================================================
+    # Si config tiene `video_mp4`, extraemos los frames automaticamente desde
+    # el mp4 hacia clips/<clip>/ antes de cargar. Si no, asumimos que ya
+    # existe clips/<clip>/ con la secuencia PNG.
     clip = config["clip"]
     carpeta_clip = os.path.join(raiz, "clips", clip)
+
+    if config.get("video_mp4"):
+        ruta_video = config["video_mp4"]
+        # resolvemos la ruta: si es relativa, es relativa a la raiz tesis_2dgs_video
+        if not os.path.isabs(ruta_video):
+            ruta_video = os.path.join(raiz, ruta_video)
+
+        res = config.get("resolucion_extraccion", [256, 256])
+        H_ext, W_ext = int(res[0]), int(res[1])
+
+        n_ext_obj = config.get("n_frames_extraer")           # None = todos
+        fps_ext   = config.get("fps_extraccion")             # None = nativo
+        forzar    = bool(config.get("forzar_extraccion", False))
+
+        print(f"=== extrayendo frames del video '{ruta_video}' ===", flush=True)
+        n_extraidos = extraer_frames_de_video(
+            ruta_mp4=ruta_video,
+            carpeta_salida=carpeta_clip,
+            n_frames=n_ext_obj,
+            fps=fps_ext,
+            H=H_ext, W=W_ext,
+            forzar=forzar,
+        )
+        print(f"  frames disponibles en {carpeta_clip}: {n_extraidos}", flush=True)
+
     if not os.path.isdir(carpeta_clip):
-        raise FileNotFoundError(f"clip no encontrado: {carpeta_clip}")
+        raise FileNotFoundError(
+            f"clip no encontrado: {carpeta_clip}.\n"
+            f"  - O bien colocaste un mp4 en `video/` y agregaste `video_mp4` al config,\n"
+            f"  - o bien existe ya una secuencia PNG en `clips/{clip}/`."
+        )
+
     frames = cargar_clip(carpeta_clip, device, max_frames=config.get("max_frames"))
     n_frames, H, W, _ = frames.shape
     print(f"clip={clip}  n_frames={n_frames}  resolucion={H}x{W}", flush=True)
