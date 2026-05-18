@@ -1,7 +1,32 @@
-.venv
+.venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.db    
-gaussian_splating_2d/__pycache__/
+*.db
+
+# IDE
+.vscode/
+
+# CUDA build outputs
+raster_cuda/build/
+raster_cuda/*.pyd
+raster_cuda/*.png
+raster_cuda/preview_cuda_checkpoint_k*/
+
+# datasets, videos, clips
+tesis_2dgs_video/clips/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# experiment outputs
+tesis_2dgs_video/resultados/
+
+# previews/checkpoints pesados
+*.pt
+*.pth
+*.ckpt
+*.npz

@@ -51,7 +51,9 @@ def cargar_clip(carpeta_clip, device, max_frames=None):
 
 def elegir_device(device_str):
     if device_str == "auto":
-        if torch.backends.mps.is_available():
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(device_str)
