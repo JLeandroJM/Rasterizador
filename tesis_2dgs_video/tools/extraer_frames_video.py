@@ -10,16 +10,16 @@ import cv2
 
 # Nombre del video dentro de:
 # tesis_2dgs_video/clips/videos/
-VIDEO_NOMBRE = "rockyourbody.mp4"
+VIDEO_NOMBRE = "thriller.mp4"
 
 # Cuantos frames por segundo quieres extraer
-FPS_SALIDA = 20
+FPS_SALIDA = 25
 
 # Desde que segundo empieza
-SEGUNDO_INICIO = 93
+SEGUNDO_INICIO = 24
 
 # Cuantos segundos quieres extraer
-DURACION_SEGUNDOS = 10
+DURACION_SEGUNDOS = 5
 
 # Opciones de resolucion
 # Si FORZAR_CUADRADO = False:
@@ -29,10 +29,10 @@ DURACION_SEGUNDOS = 10
 # Si FORZAR_CUADRADO = True:
 #   recorta el centro y redimensiona a TAMANO_CUADRADO x TAMANO_CUADRADO.
 FORZAR_CUADRADO = False
-TAMANO_CUADRADO = 256
+TAMANO_CUADRADO = 256*2
 
 # Solo se usa si FORZAR_CUADRADO = False
-ALTO_SALIDA = 144
+ALTO_SALIDA = 144*2
 
 # Si True, borra frames viejos de la carpeta de salida antes de generar nuevos
 LIMPIAR_SALIDA = True

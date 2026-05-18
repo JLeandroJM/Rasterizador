@@ -36,6 +36,38 @@ from visualizar_trayectorias import (
 )
 
 
+try:
+    from rasterizador_cuda_autograd import rasterizar_un_frame_cuda_conic
+except Exception:
+    rasterizar_un_frame_cuda_conic = None
+
+try:
+    from rasterizador_cuda_tiled_autograd import rasterizar_un_frame_cuda_tiled
+except Exception:
+    rasterizar_un_frame_cuda_tiled = None
+
+
+
+
+def rasterizar_segun_config(params_j, H, W, config):
+    if bool(config.get("usar_cuda_tiled", False)):
+        if rasterizar_un_frame_cuda_tiled is None:
+            raise RuntimeError("usar_cuda_tiled=true pero no se pudo importar rasterizador CUDA tiled")
+        return rasterizar_un_frame_cuda_tiled(
+            params_j,
+            H,
+            W,
+            tile_size=int(config.get("cuda_tile_size", 16)),
+            k_sigma=float(config.get("cuda_k_sigma", 3.5))
+        )
+
+    if bool(config.get("usar_cuda_conic", False)):
+        if rasterizar_un_frame_cuda_conic is None:
+            raise RuntimeError("usar_cuda_conic=true pero no se pudo importar rasterizador CUDA conic")
+        return rasterizar_un_frame_cuda_conic(params_j, H, W)
+
+    return rasterizar_un_frame(params_j, H, W)
+
 
 def cargar_clip(carpeta_clip, device, max_frames=None):
     archivos = sorted(f for f in os.listdir(carpeta_clip)
@@ -162,6 +194,10 @@ def main():
     }
     print(f"matrices ({base}) construidas para grados: {grados_distintos}", flush=True)
 
+    usar_frame0_color = bool(config.get("inicializar_color_desde_frame0", True))
+
+    frame_init_color = frames[0] if usar_frame0_color else None
+
     modelo = GaussianasPolinomial2D(
         n_gaussianas=config["n_gaussianas_inicial"],
         n_frames=n_frames,
@@ -170,7 +206,7 @@ def main():
         H=H, W=W,
         device=device,
         escala_inicial_px=config["escala_inicial_px"],
-        frame_0_imagen=frames[0],
+        frame_0_imagen=frame_init_color,
         semilla=seed,
     )
     print(f"modelo: N={modelo.numero_gausianas()}  grados={grados}", flush=True)
@@ -211,7 +247,7 @@ def main():
     with torch.no_grad():
         for j in range(n_frames):
             params_j = modelo.evaluar_en_frame(j, matrices_base)
-            r = rasterizar_un_frame(params_j, H, W).clamp(0, 1)
+            r = rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
             render_pre_list.append(r)
     render_pre = torch.stack(render_pre_list, dim=0)
     rep_pre = reporte_completo(render_pre, frames, device=device)
@@ -230,9 +266,22 @@ def main():
     with torch.no_grad():
         for j in range(n_frames):
             params_j = modelo.evaluar_en_frame(j, matrices_base)
-            r = rasterizar_un_frame(params_j, H, W).clamp(0, 1)
+            r = rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
             render_post_list.append(r)
+
     render_post = torch.stack(render_post_list, dim=0)
+
+    # debug de movimiento del render
+    with torch.no_grad():
+        d_0_mid = torch.mean(torch.abs(render_post[0] - render_post[n_frames // 2])).item()
+        d_mid_last = torch.mean(torch.abs(render_post[n_frames // 2] - render_post[-1])).item()
+        d_0_last = torch.mean(torch.abs(render_post[0] - render_post[-1])).item()
+
+    print("\n=== debug movimiento render ===", flush=True)
+    print(f"  diff frame0 vs mid  = {d_0_mid:.6f}", flush=True)
+    print(f"  diff mid vs last    = {d_mid_last:.6f}", flush=True)
+    print(f"  diff frame0 vs last = {d_0_last:.6f}", flush=True)
+
     rep_post = reporte_completo(render_post, frames, device=device)
     print(f"  PSNR_post={rep_post['psnr_promedio']:.2f}  SSIM_post={rep_post['ssim_promedio']:.4f}",
           flush=True)
@@ -314,8 +363,24 @@ def main():
                                   os.path.join(salida, "evolucion_parametros.png"))
     generar_coeficientes_magnitudes(modelo,
                                       os.path.join(salida, "coeficientes_magnitudes.png"))
-    generar_reconstruccion_gif(modelo, frames, matrices_base,
-                                os.path.join(salida, "reconstruccion_vs_original.gif"))
+    import imageio.v2 as imageio
+
+    ruta_gif = os.path.join(salida, "reconstruccion_vs_original.gif")
+    cuadros = []
+    paso = 2
+    factor_diff = 5.0
+
+    frames_np_vis = frames.detach().clamp(0, 1).cpu().numpy()
+    render_np_vis = render_post.detach().clamp(0, 1).cpu().numpy()
+
+    for j in range(0, n_frames, paso):
+        target = frames_np_vis[j]
+        render = render_np_vis[j]
+        diff = np.clip(np.abs(target - render) * factor_diff, 0, 1)
+        concat = np.concatenate([target, render, diff], axis=1)
+        cuadros.append((concat * 255).astype(np.uint8))
+
+    imageio.mimsave(ruta_gif, cuadros, duration=0.066)
 
     print(f"\nlisto. resultados en: {salida}", flush=True)
 

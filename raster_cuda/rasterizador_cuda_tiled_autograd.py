@@ -180,7 +180,7 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             k_sigma=k_sigma
         )
 
-        render = raster_cuda.forward_tiled(
+        render, final_Ts, n_contrib = raster_cuda.forward_tiled_train(
             mu_c,
             conic,
             opacity_c,
@@ -200,7 +200,9 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             opacity_c,
             color_c,
             gaussian_ids,
-            ranges
+            ranges,
+            final_Ts,
+            n_contrib
         )
         ctx.H = H
         ctx.W = W
@@ -210,15 +212,28 @@ class RasterizarTiledCUDA(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_render):
-        mu, scale, theta, conic, opacity, color, gaussian_ids, ranges = ctx.saved_tensors
+        (
+            mu,
+            scale,
+            theta,
+            conic,
+            opacity,
+            color,
+            gaussian_ids,
+            ranges,
+            final_Ts,
+            n_contrib
+        ) = ctx.saved_tensors
 
-        grad_mu, grad_conic, grad_opacity, grad_color = raster_cuda.backward_tiled(
+        grad_mu, grad_conic, grad_opacity, grad_color = raster_cuda.backward_tiled_fast(
             mu,
             conic,
             opacity,
             color,
             gaussian_ids,
             ranges,
+            final_Ts,
+            n_contrib,
             grad_render.contiguous(),
             ctx.H,
             ctx.W,
@@ -243,7 +258,6 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             None,
             None
         )
-
 
 def rasterizar_un_frame_cuda_tiled(params_frame, H, W, tile_size=16, k_sigma=3.5):
     depth = params_frame["depth"]

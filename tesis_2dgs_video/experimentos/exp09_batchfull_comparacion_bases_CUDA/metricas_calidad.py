@@ -107,7 +107,8 @@ def reporte_completo(render_batch, frames_gt, device=None):
     for j in range(n_frames):
         psnrs.append(calcular_psnr(render_batch[j], frames_gt[j]))
         ssims.append(calcular_ssim(render_batch[j], frames_gt[j]))
-        lpipss.append(calcular_lpips(render_batch[j], frames_gt[j], device=device))
+        #lpipss.append(calcular_lpips(render_batch[j], frames_gt[j], device=device))
+        lpipss.append(None)
 
     lp_validos = [l for l in lpipss if l is not None]
     return {

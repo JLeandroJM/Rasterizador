@@ -1,31 +1,7 @@
-import os
-import sys
 import math
 import torch
+import raster_cuda
 
-AQUI = os.path.dirname(os.path.abspath(__file__))
-
-RAIZ_RASTERIZADOR = os.path.abspath(
-    os.path.join(AQUI, "..", "..", "..")
-)
-
-RUTA_RASTER_CUDA = os.path.join(RAIZ_RASTERIZADOR, "raster_cuda")
-
-print(f"[rasterizador_cuda_tiled_autograd] buscando raster_cuda en: {RUTA_RASTER_CUDA}", flush=True)
-
-if not os.path.isdir(RUTA_RASTER_CUDA):
-    raise FileNotFoundError(f"No existe la carpeta raster_cuda: {RUTA_RASTER_CUDA}")
-
-if RUTA_RASTER_CUDA not in sys.path:
-    sys.path.insert(0, RUTA_RASTER_CUDA)
-
-try:
-    import raster_cuda
-except Exception as e:
-    print("[rasterizador_cuda_tiled_autograd] sys.path usado:", flush=True)
-    for p in sys.path[:8]:
-        print("  ", p, flush=True)
-    raise e
 
 def construir_conic(scale, theta):
     sx = scale[:, 0]
@@ -204,7 +180,7 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             k_sigma=k_sigma
         )
 
-        render, final_Ts, n_contrib = raster_cuda.forward_tiled_train(
+        render = raster_cuda.forward_tiled(
             mu_c,
             conic,
             opacity_c,
@@ -224,9 +200,7 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             opacity_c,
             color_c,
             gaussian_ids,
-            ranges,
-            final_Ts,
-            n_contrib
+            ranges
         )
         ctx.H = H
         ctx.W = W
@@ -236,28 +210,15 @@ class RasterizarTiledCUDA(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_render):
-        (
-            mu,
-            scale,
-            theta,
-            conic,
-            opacity,
-            color,
-            gaussian_ids,
-            ranges,
-            final_Ts,
-            n_contrib
-        ) = ctx.saved_tensors
+        mu, scale, theta, conic, opacity, color, gaussian_ids, ranges = ctx.saved_tensors
 
-        grad_mu, grad_conic, grad_opacity, grad_color = raster_cuda.backward_tiled_fast(
+        grad_mu, grad_conic, grad_opacity, grad_color = raster_cuda.backward_tiled(
             mu,
             conic,
             opacity,
             color,
             gaussian_ids,
             ranges,
-            final_Ts,
-            n_contrib,
             grad_render.contiguous(),
             ctx.H,
             ctx.W,
@@ -282,6 +243,7 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             None,
             None
         )
+
 
 def rasterizar_un_frame_cuda_tiled(params_frame, H, W, tile_size=16, k_sigma=3.5):
     depth = params_frame["depth"]

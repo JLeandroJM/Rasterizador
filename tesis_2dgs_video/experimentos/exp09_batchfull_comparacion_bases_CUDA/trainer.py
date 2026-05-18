@@ -195,7 +195,9 @@ def entrenar_batch_full(modelo, frames, matrices_base, optimizer, config,
         # checkpoint y log detallado
         es_checkpoint = (epoch + 1) % chk_each == 0 or epoch == 0 or epoch == n_epochs - 1
         if es_checkpoint:
-            psnr_avg = _evaluar_psnr_promedio(modelo, frames, matrices_base)
+            #psnr_avg = _evaluar_psnr_promedio(modelo, frames, matrices_base)
+            psnr_avg = -1.0
+
             psnrs_chk.append((epoch, psnr_avg))
 
             t_corrido = time.time() - t_inicio
@@ -219,8 +221,8 @@ def entrenar_batch_full(modelo, frames, matrices_base, optimizer, config,
                 }, os.path.join(carpeta_salida, f"checkpoint_epoch{epoch+1:04d}.pt"))
 
                 # verificacion visual: renderizar y guardar primer y ultimo frame
-                _guardar_verificacion_visual(modelo, frames, matrices_base,
-                                              carpeta_salida, epoch + 1)
+                #_guardar_verificacion_visual(modelo, frames, matrices_base,
+                #                              carpeta_salida, epoch + 1)
         else:
             # log minimo para no spamear
             if (epoch + 1) % max(1, chk_each // 5) == 0:
