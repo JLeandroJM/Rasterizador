@@ -188,6 +188,9 @@ torch::Tensor raster_forward_tiled(
     TORCH_CHECK(color.dim() == 2 && color.size(1) == 3, "color debe tener shape (N, 3)");
     TORCH_CHECK(ranges.dim() == 2 && ranges.size(1) == 2, "ranges debe tener shape (num_tiles, 2)");
 
+    TORCH_CHECK(tile_size > 0, "tile_size debe ser positivo");
+    TORCH_CHECK(tile_size * tile_size <= 256, "tile_size demasiado grande para esta version optimizada");
+
     return raster_forward_tiled_cuda(
         mu, conic, opacity, color, gaussian_ids, ranges, H, W, tile_size
     );
@@ -267,6 +270,9 @@ std::vector<torch::Tensor> raster_backward_tiled(
     TORCH_CHECK(gaussian_ids.dtype() == torch::kInt64, "gaussian_ids debe ser int64");
     TORCH_CHECK(ranges.dtype() == torch::kInt64, "ranges debe ser int64");
 
+    TORCH_CHECK(tile_size > 0, "tile_size debe ser positivo");
+    TORCH_CHECK(tile_size * tile_size <= 256, "tile_size demasiado grande para esta version optimizada");
+
     return raster_backward_tiled_cuda(
         mu,
         conic,
@@ -315,6 +321,9 @@ std::vector<torch::Tensor> raster_forward_tiled_train(
     TORCH_CHECK(color.dtype() == torch::kFloat32, "color debe ser float32");
     TORCH_CHECK(gaussian_ids.dtype() == torch::kInt64, "gaussian_ids debe ser int64");
     TORCH_CHECK(ranges.dtype() == torch::kInt64, "ranges debe ser int64");
+
+    TORCH_CHECK(tile_size > 0, "tile_size debe ser positivo");
+    TORCH_CHECK(tile_size * tile_size <= 256, "tile_size demasiado grande para esta version optimizada");
 
     return raster_forward_tiled_train_cuda(
         mu, conic, opacity, color, gaussian_ids, ranges, H, W, tile_size
@@ -365,6 +374,9 @@ std::vector<torch::Tensor> raster_backward_tiled_fast(
     TORCH_CHECK(gaussian_ids.dtype() == torch::kInt64, "gaussian_ids debe ser int64");
     TORCH_CHECK(ranges.dtype() == torch::kInt64, "ranges debe ser int64");
     TORCH_CHECK(n_contrib.dtype() == torch::kInt32, "n_contrib debe ser int32");
+
+    TORCH_CHECK(tile_size > 0, "tile_size debe ser positivo");
+    TORCH_CHECK(tile_size * tile_size <= 256, "tile_size demasiado grande para esta version optimizada");
 
     return raster_backward_tiled_fast_cuda(
         mu, conic, opacity, color, gaussian_ids, ranges,

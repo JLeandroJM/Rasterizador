@@ -2,6 +2,58 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#ifndef RASTER_BATCH_SIZE
+#define RASTER_BATCH_SIZE 256
+#endif
+
+// Shared-memory eval used by tiled kernels.
+// This avoids reloading the same gaussian data for every pixel in a tile.
+__device__ __forceinline__ float evaluar_alpha_values_device(
+    float mu_f,
+    float mu_c,
+    float m00,
+    float m01,
+    float m11,
+    float op,
+    float pr,
+    float pc,
+    float* G_out,
+    float* dx_out,
+    float* dy_out,
+    bool* unclamped_out
+) {
+    float dx = pr - mu_f;
+    float dy = pc - mu_c;
+
+    float quad = dx * (m00 * dx + m01 * dy) +
+                 dy * (m01 * dx + m11 * dy);
+
+    float G = expf(-0.5f * quad);
+    float alpha_pre = op * G;
+    bool unclamped = alpha_pre < 0.99f;
+
+    float alpha = alpha_pre;
+    if (alpha > 0.99f) {
+        alpha = 0.99f;
+    }
+
+    if (G_out) {
+        *G_out = G;
+    }
+    if (dx_out) {
+        *dx_out = dx;
+    }
+    if (dy_out) {
+        *dy_out = dy;
+    }
+    if (unclamped_out) {
+        *unclamped_out = unclamped;
+    }
+
+    return alpha;
+}
+
+
 __global__ void raster_forward_kernel(
     const float* mu,
     const float* scale,
@@ -167,30 +219,22 @@ __global__ void raster_forward_tiled_kernel(
     int tiles_x
 ) {
     int tile_id = blockIdx.x;
-    int local_idx = threadIdx.x;
+    int tid = threadIdx.x;
 
-    int local_y = local_idx / tile_size;
-    int local_x = local_idx % tile_size;
+    int local_y = tid / tile_size;
+    int local_x = tid % tile_size;
 
     int tile_y = tile_id / tiles_x;
     int tile_x = tile_id % tiles_x;
 
     int fila = tile_y * tile_size + local_y;
     int col = tile_x * tile_size + local_x;
-
-    if (fila >= H || col >= W) {
-        return;
-    }
+    bool active = (fila < H && col < W);
 
     long long start = ranges[tile_id * 2 + 0];
     long long end = ranges[tile_id * 2 + 1];
 
-    int out_idx = (fila * W + col) * 3;
-
     if (start < 0 || end <= start) {
-        out[out_idx + 0] = 0.0f;
-        out[out_idx + 1] = 0.0f;
-        out[out_idx + 2] = 0.0f;
         return;
     }
 
@@ -200,50 +244,90 @@ __global__ void raster_forward_tiled_kernel(
     float r_final = 0.0f;
     float g_final = 0.0f;
     float b_final = 0.0f;
-
     float T = 1.0f;
 
-    for (long long p = start; p < end; p++) {
-        int i = (int)gaussian_ids[p];
+    bool done = !active;
 
-        float mu_f = mu[i * 2 + 0];
-        float mu_c = mu[i * 2 + 1];
+    __shared__ int s_gid[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_f[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_c[RASTER_BATCH_SIZE];
+    __shared__ float s_m00[RASTER_BATCH_SIZE];
+    __shared__ float s_m01[RASTER_BATCH_SIZE];
+    __shared__ float s_m11[RASTER_BATCH_SIZE];
+    __shared__ float s_opacity[RASTER_BATCH_SIZE];
+    __shared__ float s_color_r[RASTER_BATCH_SIZE];
+    __shared__ float s_color_g[RASTER_BATCH_SIZE];
+    __shared__ float s_color_b[RASTER_BATCH_SIZE];
 
-        float df = pr - mu_f;
-        float dc = pc - mu_c;
+    const float T_MIN = 1.0e-4f;
 
-        float m00 = conic[i * 3 + 0];
-        float m01 = conic[i * 3 + 1];
-        float m11 = conic[i * 3 + 2];
+    for (long long batch_start = start; batch_start < end; batch_start += RASTER_BATCH_SIZE) {
+        int batch_count = (int)min((long long)RASTER_BATCH_SIZE, end - batch_start);
 
-        float quad = df * (m00 * df + m01 * dc) +
-                     dc * (m01 * df + m11 * dc);
-
-        float G = expf(-0.5f * quad);
-        float alpha = opacity[i] * G;
-
-        if (alpha > 0.99f) {
-            alpha = 0.99f;
+        // Threads cooperate to load gaussian data once per tile.
+        for (int load_id = tid; load_id < batch_count; load_id += blockDim.x) {
+            int gid = (int)gaussian_ids[batch_start + load_id];
+            s_gid[load_id] = gid;
+            s_mu_f[load_id] = mu[gid * 2 + 0];
+            s_mu_c[load_id] = mu[gid * 2 + 1];
+            s_m00[load_id] = conic[gid * 3 + 0];
+            s_m01[load_id] = conic[gid * 3 + 1];
+            s_m11[load_id] = conic[gid * 3 + 2];
+            s_opacity[load_id] = opacity[gid];
+            s_color_r[load_id] = color[gid * 3 + 0];
+            s_color_g[load_id] = color[gid * 3 + 1];
+            s_color_b[load_id] = color[gid * 3 + 2];
         }
 
-        float peso = alpha * T;
+        __syncthreads();
 
-        r_final += peso * color[i * 3 + 0];
-        g_final += peso * color[i * 3 + 1];
-        b_final += peso * color[i * 3 + 2];
+        if (!done) {
+            #pragma unroll 1
+            for (int k = 0; k < batch_count; k++) {
+                float alpha = evaluar_alpha_values_device(
+                    s_mu_f[k],
+                    s_mu_c[k],
+                    s_m00[k],
+                    s_m01[k],
+                    s_m11[k],
+                    s_opacity[k],
+                    pr,
+                    pc,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr
+                );
 
-        T *= (1.0f - alpha);
+                float peso = alpha * T;
 
-        if (T < 1e-4f) {
+                r_final += peso * s_color_r[k];
+                g_final += peso * s_color_g[k];
+                b_final += peso * s_color_b[k];
+
+                T *= (1.0f - alpha);
+
+                if (T < T_MIN) {
+                    done = true;
+                    break;
+                }
+            }
+        }
+
+        // Same idea used in tile rasterizers: stop when every pixel is opaque enough.
+        int done_count = __syncthreads_count(done);
+        if (done_count == blockDim.x) {
             break;
         }
     }
 
-    out[out_idx + 0] = r_final;
-    out[out_idx + 1] = g_final;
-    out[out_idx + 2] = b_final;
+    if (active) {
+        int out_idx = (fila * W + col) * 3;
+        out[out_idx + 0] = r_final;
+        out[out_idx + 1] = g_final;
+        out[out_idx + 2] = b_final;
+    }
 }
-
 
 
 __device__ __forceinline__ float evaluar_alpha_conic_device(
@@ -669,15 +753,23 @@ __global__ void raster_forward_tiled_train_kernel(
 
     int fila = tile_y * tile_size + local_y;
     int col = tile_x * tile_size + local_x;
-
-    if (fila >= H || col >= W) {
-        return;
-    }
+    bool active = (fila < H && col < W);
 
     int pix = fila * W + col;
 
     int64_t start = ranges[tile_id * 2 + 0];
     int64_t end = ranges[tile_id * 2 + 1];
+
+    if (start < 0 || end <= start) {
+        if (active) {
+            out[pix * 3 + 0] = 0.0f;
+            out[pix * 3 + 1] = 0.0f;
+            out[pix * 3 + 2] = 0.0f;
+            final_Ts[pix] = 1.0f;
+            n_contrib[pix] = 0;
+        }
+        return;
+    }
 
     float pr = (float)fila + 0.5f;
     float pc = (float)col + 0.5f;
@@ -688,60 +780,97 @@ __global__ void raster_forward_tiled_train_kernel(
     float acc_b = 0.0f;
 
     int32_t processed = 0;
+    bool done = !active;
+
+    __shared__ int s_gid[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_f[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_c[RASTER_BATCH_SIZE];
+    __shared__ float s_m00[RASTER_BATCH_SIZE];
+    __shared__ float s_m01[RASTER_BATCH_SIZE];
+    __shared__ float s_m11[RASTER_BATCH_SIZE];
+    __shared__ float s_opacity[RASTER_BATCH_SIZE];
+    __shared__ float s_color_r[RASTER_BATCH_SIZE];
+    __shared__ float s_color_g[RASTER_BATCH_SIZE];
+    __shared__ float s_color_b[RASTER_BATCH_SIZE];
 
     const float EPS_ALPHA = 1.0f / 255.0f;
     const float T_MIN = 1.0e-4f;
 
-    if (start >= 0 && end > start) {
-        for (int64_t ii = start; ii < end; ii++) {
-            processed = (int32_t)(ii - start + 1);
+    for (int64_t batch_start = start; batch_start < end; batch_start += RASTER_BATCH_SIZE) {
+        int batch_count = (int)min((int64_t)RASTER_BATCH_SIZE, end - batch_start);
 
-            int gid = (int)gaussian_ids[ii];
+        // Threads cooperate to load gaussian data once per tile.
+        for (int load_id = tid; load_id < batch_count; load_id += blockDim.x) {
+            int gid = (int)gaussian_ids[batch_start + load_id];
+            s_gid[load_id] = gid;
+            s_mu_f[load_id] = mu[gid * 2 + 0];
+            s_mu_c[load_id] = mu[gid * 2 + 1];
+            s_m00[load_id] = conic[gid * 3 + 0];
+            s_m01[load_id] = conic[gid * 3 + 1];
+            s_m11[load_id] = conic[gid * 3 + 2];
+            s_opacity[load_id] = opacity[gid];
+            s_color_r[load_id] = color[gid * 3 + 0];
+            s_color_g[load_id] = color[gid * 3 + 1];
+            s_color_b[load_id] = color[gid * 3 + 2];
+        }
 
-            float G = 0.0f;
-            float dx = 0.0f;
-            float dy = 0.0f;
-            float power = 0.0f;
-            bool unclamped = true;
+        __syncthreads();
 
-            float alpha = evaluar_alpha_conic_device(
-                mu,
-                conic,
-                opacity,
-                gid,
-                pr,
-                pc,
-                &G,
-                &dx,
-                &dy,
-                &power,
-                &unclamped
-            );
+        if (!done) {
+            #pragma unroll 1
+            for (int k = 0; k < batch_count; k++) {
+                int64_t global_pos = batch_start + k;
+                processed = (int32_t)(global_pos - start + 1);
 
-            if (alpha < EPS_ALPHA) {
-                continue;
+                float alpha = evaluar_alpha_values_device(
+                    s_mu_f[k],
+                    s_mu_c[k],
+                    s_m00[k],
+                    s_m01[k],
+                    s_m11[k],
+                    s_opacity[k],
+                    pr,
+                    pc,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr
+                );
+
+                if (alpha < EPS_ALPHA) {
+                    continue;
+                }
+
+                float peso = T * alpha;
+
+                acc_r += peso * s_color_r[k];
+                acc_g += peso * s_color_g[k];
+                acc_b += peso * s_color_b[k];
+
+                T *= (1.0f - alpha);
+
+                if (T < T_MIN) {
+                    done = true;
+                    break;
+                }
             }
+        }
 
-            float peso = T * alpha;
-
-            acc_r += peso * color[gid * 3 + 0];
-            acc_g += peso * color[gid * 3 + 1];
-            acc_b += peso * color[gid * 3 + 2];
-
-            T *= (1.0f - alpha);
-
-            if (T < T_MIN) {
-                break;
-            }
+        // Same idea used in tile rasterizers: stop when every pixel is opaque enough.
+        int done_count = __syncthreads_count(done);
+        if (done_count == blockDim.x) {
+            break;
         }
     }
 
-    out[pix * 3 + 0] = acc_r;
-    out[pix * 3 + 1] = acc_g;
-    out[pix * 3 + 2] = acc_b;
+    if (active) {
+        out[pix * 3 + 0] = acc_r;
+        out[pix * 3 + 1] = acc_g;
+        out[pix * 3 + 2] = acc_b;
 
-    final_Ts[pix] = T;
-    n_contrib[pix] = processed;
+        final_Ts[pix] = T;
+        n_contrib[pix] = processed;
+    }
 }
 
 
@@ -775,10 +904,7 @@ __global__ void raster_backward_tiled_fast_kernel(
 
     int fila = tile_y * tile_size + local_y;
     int col = tile_x * tile_size + local_x;
-
-    if (fila >= H || col >= W) {
-        return;
-    }
+    bool active = (fila < H && col < W);
 
     int pix = fila * W + col;
 
@@ -789,122 +915,169 @@ __global__ void raster_backward_tiled_fast_kernel(
         return;
     }
 
-    int32_t processed = n_contrib[pix];
-    if (processed <= 0) {
-        return;
-    }
+    int32_t processed = 0;
+    int64_t last = start - 1;
 
-    int64_t last = start + (int64_t)processed - 1;
-    if (last >= end) {
-        last = end - 1;
+    if (active) {
+        processed = n_contrib[pix];
+        if (processed > 0) {
+            last = start + (int64_t)processed - 1;
+            if (last >= end) {
+                last = end - 1;
+            }
+        }
     }
 
     float pr = (float)fila + 0.5f;
     float pc = (float)col + 0.5f;
 
-    float go_r = grad_out[pix * 3 + 0];
-    float go_g = grad_out[pix * 3 + 1];
-    float go_b = grad_out[pix * 3 + 2];
+    float go_r = active ? grad_out[pix * 3 + 0] : 0.0f;
+    float go_g = active ? grad_out[pix * 3 + 1] : 0.0f;
+    float go_b = active ? grad_out[pix * 3 + 2] : 0.0f;
 
-    // T_after = producto de transmitancias despues del ultimo splat procesado.
-    // En forward guardamos el T final.
-    float T_after = final_Ts[pix];
+    float T_after = active ? final_Ts[pix] : 1.0f;
 
-    // tail = color compuesto de los splats que ya estan "detras" del actual,
-    // expresado relativo al punto inmediatamente despues del splat actual.
     float tail_r = 0.0f;
     float tail_g = 0.0f;
     float tail_b = 0.0f;
 
+    __shared__ int s_gid[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_f[RASTER_BATCH_SIZE];
+    __shared__ float s_mu_c[RASTER_BATCH_SIZE];
+    __shared__ float s_m00[RASTER_BATCH_SIZE];
+    __shared__ float s_m01[RASTER_BATCH_SIZE];
+    __shared__ float s_m11[RASTER_BATCH_SIZE];
+    __shared__ float s_opacity[RASTER_BATCH_SIZE];
+    __shared__ float s_color_r[RASTER_BATCH_SIZE];
+    __shared__ float s_color_g[RASTER_BATCH_SIZE];
+    __shared__ float s_color_b[RASTER_BATCH_SIZE];
+
     const float EPS_ALPHA = 1.0f / 255.0f;
 
-    for (int64_t ii = last; ii >= start; ii--) {
-        int gid = (int)gaussian_ids[ii];
+    // Iterate over the tile list back-to-front in shared-memory batches.
+    for (int64_t batch_end = end; batch_end > start; ) {
+        int batch_count = (int)min((int64_t)RASTER_BATCH_SIZE, batch_end - start);
+        int64_t batch_start = batch_end - batch_count;
 
-        float G = 0.0f;
-        float dx = 0.0f;
-        float dy = 0.0f;
-        float power = 0.0f;
-        bool unclamped = true;
+        // If no pixel in the tile needs this high-depth batch, skip it.
+        bool needs_batch = active && (processed > 0) && (last >= batch_start);
+        int needs_count = __syncthreads_count(needs_batch);
 
-        float alpha = evaluar_alpha_conic_device(
-            mu,
-            conic,
-            opacity,
-            gid,
-            pr,
-            pc,
-            &G,
-            &dx,
-            &dy,
-            &power,
-            &unclamped
-        );
+        if (needs_count > 0) {
+            for (int load_id = tid; load_id < batch_count; load_id += blockDim.x) {
+                int gid = (int)gaussian_ids[batch_start + load_id];
+                s_gid[load_id] = gid;
+                s_mu_f[load_id] = mu[gid * 2 + 0];
+                s_mu_c[load_id] = mu[gid * 2 + 1];
+                s_m00[load_id] = conic[gid * 3 + 0];
+                s_m01[load_id] = conic[gid * 3 + 1];
+                s_m11[load_id] = conic[gid * 3 + 2];
+                s_opacity[load_id] = opacity[gid];
+                s_color_r[load_id] = color[gid * 3 + 0];
+                s_color_g[load_id] = color[gid * 3 + 1];
+                s_color_b[load_id] = color[gid * 3 + 2];
+            }
 
-        if (alpha < EPS_ALPHA) {
-            continue;
+            __syncthreads();
+
+            if (active && processed > 0) {
+                #pragma unroll 1
+                for (int k = batch_count - 1; k >= 0; k--) {
+                    int64_t global_pos = batch_start + k;
+                    if (global_pos > last) {
+                        continue;
+                    }
+
+                    int gid = s_gid[k];
+
+                    float G = 0.0f;
+                    float dx = 0.0f;
+                    float dy = 0.0f;
+                    bool unclamped = true;
+
+                    float alpha = evaluar_alpha_values_device(
+                        s_mu_f[k],
+                        s_mu_c[k],
+                        s_m00[k],
+                        s_m01[k],
+                        s_m11[k],
+                        s_opacity[k],
+                        pr,
+                        pc,
+                        &G,
+                        &dx,
+                        &dy,
+                        &unclamped
+                    );
+
+                    if (alpha < EPS_ALPHA) {
+                        continue;
+                    }
+
+                    float one_minus_alpha = 1.0f - alpha;
+                    one_minus_alpha = fmaxf(one_minus_alpha, 1.0e-6f);
+
+                    // Rebuild front-to-back transmitance while walking backward.
+                    float T_i = T_after / one_minus_alpha;
+
+                    float ci_r = s_color_r[k];
+                    float ci_g = s_color_g[k];
+                    float ci_b = s_color_b[k];
+
+                    float dC_da_r = T_i * (ci_r - tail_r);
+                    float dC_da_g = T_i * (ci_g - tail_g);
+                    float dC_da_b = T_i * (ci_b - tail_b);
+
+                    float dL_dalpha =
+                        go_r * dC_da_r +
+                        go_g * dC_da_g +
+                        go_b * dC_da_b;
+
+                    float peso = T_i * alpha;
+
+                    atomicAdd(&grad_color[gid * 3 + 0], go_r * peso);
+                    atomicAdd(&grad_color[gid * 3 + 1], go_g * peso);
+                    atomicAdd(&grad_color[gid * 3 + 2], go_b * peso);
+
+                    if (unclamped) {
+                        float dL_dopacity = dL_dalpha * G;
+                        atomicAdd(&grad_opacity[gid], dL_dopacity);
+
+                        float dL_dG = dL_dalpha * s_opacity[k];
+                        float dL_dpower = dL_dG * G;
+
+                        float m00 = s_m00[k];
+                        float m01 = s_m01[k];
+                        float m11 = s_m11[k];
+
+                        float dpower_dmu_f = m00 * dx + m01 * dy;
+                        float dpower_dmu_c = m01 * dx + m11 * dy;
+
+                        atomicAdd(&grad_mu[gid * 2 + 0], dL_dpower * dpower_dmu_f);
+                        atomicAdd(&grad_mu[gid * 2 + 1], dL_dpower * dpower_dmu_c);
+
+                        float dpower_dm00 = -0.5f * dx * dx;
+                        float dpower_dm01 = -1.0f * dx * dy;
+                        float dpower_dm11 = -0.5f * dy * dy;
+
+                        atomicAdd(&grad_conic[gid * 3 + 0], dL_dpower * dpower_dm00);
+                        atomicAdd(&grad_conic[gid * 3 + 1], dL_dpower * dpower_dm01);
+                        atomicAdd(&grad_conic[gid * 3 + 2], dL_dpower * dpower_dm11);
+                    }
+
+                    // Update the already-composited tail.
+                    tail_r = alpha * ci_r + one_minus_alpha * tail_r;
+                    tail_g = alpha * ci_g + one_minus_alpha * tail_g;
+                    tail_b = alpha * ci_b + one_minus_alpha * tail_b;
+
+                    T_after = T_i;
+                }
+            }
+
+            __syncthreads();
         }
 
-        float one_minus_alpha = 1.0f - alpha;
-        one_minus_alpha = fmaxf(one_minus_alpha, 1.0e-6f);
-
-        // Reconstruccion back-to-front:
-        // final_T = T_i * (1 - alpha_i) * ...
-        // al ir hacia atras recuperamos T_i dividiendo.
-        float T_i = T_after / one_minus_alpha;
-
-        float ci_r = color[gid * 3 + 0];
-        float ci_g = color[gid * 3 + 1];
-        float ci_b = color[gid * 3 + 2];
-
-        float dC_da_r = T_i * (ci_r - tail_r);
-        float dC_da_g = T_i * (ci_g - tail_g);
-        float dC_da_b = T_i * (ci_b - tail_b);
-
-        float dL_dalpha =
-            go_r * dC_da_r +
-            go_g * dC_da_g +
-            go_b * dC_da_b;
-
-        float peso = T_i * alpha;
-
-        atomicAdd(&grad_color[gid * 3 + 0], go_r * peso);
-        atomicAdd(&grad_color[gid * 3 + 1], go_g * peso);
-        atomicAdd(&grad_color[gid * 3 + 2], go_b * peso);
-
-        if (unclamped) {
-            float dL_dopacity = dL_dalpha * G;
-            atomicAdd(&grad_opacity[gid], dL_dopacity);
-
-            float dL_dG = dL_dalpha * opacity[gid];
-            float dL_dpower = dL_dG * G;
-
-            float m00 = conic[gid * 3 + 0];
-            float m01 = conic[gid * 3 + 1];
-            float m11 = conic[gid * 3 + 2];
-
-            float dpower_dmu_f = m00 * dx + m01 * dy;
-            float dpower_dmu_c = m01 * dx + m11 * dy;
-
-            atomicAdd(&grad_mu[gid * 2 + 0], dL_dpower * dpower_dmu_f);
-            atomicAdd(&grad_mu[gid * 2 + 1], dL_dpower * dpower_dmu_c);
-
-            float dpower_dm00 = -0.5f * dx * dx;
-            float dpower_dm01 = -1.0f * dx * dy;
-            float dpower_dm11 = -0.5f * dy * dy;
-
-            atomicAdd(&grad_conic[gid * 3 + 0], dL_dpower * dpower_dm00);
-            atomicAdd(&grad_conic[gid * 3 + 1], dL_dpower * dpower_dm01);
-            atomicAdd(&grad_conic[gid * 3 + 2], dL_dpower * dpower_dm11);
-        }
-
-        // Actualizamos tail para el siguiente splat hacia atras.
-        tail_r = alpha * ci_r + one_minus_alpha * tail_r;
-        tail_g = alpha * ci_g + one_minus_alpha * tail_g;
-        tail_b = alpha * ci_b + one_minus_alpha * tail_b;
-
-        // Actualizamos T_after para el siguiente splat hacia atras.
-        T_after = T_i;
+        batch_end = batch_start;
     }
 }
 

@@ -248,8 +248,8 @@ def main():
     H = 32
     W = 32
     N = 20
-    tile_size = 32
-    k_sigma = 1
+    tile_size = 16
+    k_sigma = 20
 
 
     mu = torch.empty(N, 2, device=device)
