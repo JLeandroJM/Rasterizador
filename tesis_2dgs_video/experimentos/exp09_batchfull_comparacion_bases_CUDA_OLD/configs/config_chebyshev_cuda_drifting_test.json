@@ -1,5 +1,5 @@
 {
-  "nombre_experimento": "exp09_chebyshev_cuda_thriller_N3000_calidad_media",
+  "nombre_experimento": "exp09_chebyshev_cuda_drifting_test3",
   "base": "chebyshev",
 
   "video_mp4": null,
@@ -8,10 +8,9 @@
   "resolucion_extraccion": [256, 256],
   "forzar_extraccion": false,
 
-  "inicializar_color_desde_frame0": true,
-  "clip": "thriller_clips",
+  "clip": "drifting_circles",
 
-  "n_gaussianas_inicial": 3000,
+  "n_gaussianas_inicial": 15000,
 
   "grados": {
     "mu": 30,
@@ -42,23 +41,23 @@
     "depth_high": 0.0001
   },
 
-  "n_epochs": 1000,
+  "n_epochs": 200,
 
-  "beta_smoothness": 0.00001,
+  "beta_smoothness": 0.000001,
 
   "pesos_smoothness": {
     "mu": 1.0,
     "opacity": 0.5,
-    "color": 2.0,
+    "color": 1.0,
     "scale": 2.0,
     "theta": 2.0,
     "depth": 2.0
   },
 
   "umbral_pruning_post": 0.03,
-  "checkpoint_cada_n_epochs": 50,
+  "checkpoint_cada_n_epochs": 100,
   "sub_batch_frames": 1,
-  "lambda_dssim": 0.2,
+  "lambda_dssim": 0.05,
   "escala_inicial_px": 4.0,
 
   "max_frames": null,
@@ -73,5 +72,6 @@
   "cuda_tile_size": 16,
   "cuda_k_sigma": 5.0,
 
-  "calcular_psnr_durante_training": false
+  "calcular_psnr_durante_training": false,
+  "inicializar_color_desde_frame0": true
 }

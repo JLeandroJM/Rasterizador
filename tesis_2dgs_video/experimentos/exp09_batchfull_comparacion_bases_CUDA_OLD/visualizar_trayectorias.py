@@ -176,27 +176,3 @@ def generar_reconstruccion_gif(modelo, frames, matrices_base, ruta_gif,
         concat = np.concatenate([target, render_j, diff], axis=1)
         cuadros.append((concat * 255).astype(np.uint8))
     imageio.mimsave(ruta_gif, cuadros, duration=duracion)
-
-
-@torch.no_grad()
-def generar_reconstruccion_gif_desde_render(render_batch, frames, ruta_gif,
-                                            paso=2, factor_diff=5.0, duracion=0.066):
-    """
-    Genera GIF original | reconstruido | diff usando renders ya calculados.
-
-    Esta version evita volver a rasterizar con el rasterizador PyTorch viejo.
-    Usala desde correr.py cuando ya tengas render_post calculado con CUDA.
-    """
-    cuadros = []
-    render_np = render_batch.detach().clamp(0, 1).cpu().numpy()
-    frames_np = frames.detach().clamp(0, 1).cpu().numpy()
-
-    n_frames = render_np.shape[0]
-    for j in range(0, n_frames, paso):
-        target = frames_np[j]
-        render = render_np[j]
-        diff = np.clip(np.abs(target - render) * factor_diff, 0, 1)
-        concat = np.concatenate([target, render, diff], axis=1)
-        cuadros.append((concat * 255).astype(np.uint8))
-
-    imageio.mimsave(ruta_gif, cuadros, duration=duracion)

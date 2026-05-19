@@ -1,16 +1,16 @@
 """
 Entry point de exp09.
 
-Uso (Windows + RTX 4050):
-    python correr.py --config configs/config_chebyshev.json
-    python correr.py --config configs/config_monomial.json
+Cambios de rendimiento:
+- Usa CUDA segun config para renders de metricas/previews.
+- Flags para apagar metricas pesadas, compresion, visualizaciones y GIF.
+- GIF se genera desde render_post ya calculado, sin volver a rasterizar.
 """
 import argparse
 import csv
 import json
 import os
 import sys
-import time
 
 import numpy as np
 import torch
@@ -32,9 +32,7 @@ from visualizar_trayectorias import (
     generar_heatmap_opacity,
     generar_evolucion_parametros,
     generar_coeficientes_magnitudes,
-    generar_reconstruccion_gif,
 )
-
 
 try:
     from rasterizador_cuda_autograd import rasterizar_un_frame_cuda_conic
@@ -47,6 +45,12 @@ except Exception:
     rasterizar_un_frame_cuda_tiled = None
 
 
+def _fmt_metric(x, nd=4):
+    if x is None:
+        return "n/a"
+    if isinstance(x, float) and np.isinf(x):
+        return "inf"
+    return f"{x:.{nd}f}"
 
 
 def rasterizar_segun_config(params_j, H, W, config):
@@ -58,7 +62,7 @@ def rasterizar_segun_config(params_j, H, W, config):
             H,
             W,
             tile_size=int(config.get("cuda_tile_size", 16)),
-            k_sigma=float(config.get("cuda_k_sigma", 3.5))
+            k_sigma=float(config.get("cuda_k_sigma", 3.5)),
         )
 
     if bool(config.get("usar_cuda_conic", False)):
@@ -69,41 +73,76 @@ def rasterizar_segun_config(params_j, H, W, config):
     return rasterizar_un_frame(params_j, H, W)
 
 
+@torch.no_grad()
+def renderizar_clip(modelo, matrices_base, H, W, n_frames, config):
+    """Renderiza todos los frames usando el rasterizador del config."""
+    renders = []
+    for j in range(n_frames):
+        params_j = modelo.evaluar_en_frame(j, matrices_base)
+        r = rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
+        renders.append(r)
+    return torch.stack(renders, dim=0)
+
+
+def guardar_gif_desde_render(render_batch, frames, ruta_gif, paso=2, factor_diff=5.0, duracion=0.066):
+    """Genera GIF original | reconstruido | diff usando renders ya calculados."""
+    import imageio.v2 as imageio
+
+    cuadros = []
+    frames_np = frames.detach().clamp(0, 1).cpu().numpy()
+    render_np = render_batch.detach().clamp(0, 1).cpu().numpy()
+
+    for j in range(0, render_np.shape[0], paso):
+        target = frames_np[j]
+        render = render_np[j]
+        diff = np.clip(np.abs(target - render) * factor_diff, 0, 1)
+        concat = np.concatenate([target, render, diff], axis=1)
+        cuadros.append((concat * 255).astype(np.uint8))
+
+    imageio.mimsave(ruta_gif, cuadros, duration=duracion)
+
+
 def cargar_clip(carpeta_clip, device, max_frames=None):
     archivos = sorted(f for f in os.listdir(carpeta_clip)
-                        if f.startswith("frame_") and f.endswith(".png"))
+                      if f.startswith("frame_") and f.endswith(".png"))
     if max_frames is not None:
         archivos = archivos[:max_frames]
+
     fr = []
     for nombre in archivos:
         img = Image.open(os.path.join(carpeta_clip, nombre)).convert("RGB")
         fr.append(torch.from_numpy(np.array(img, dtype=np.float32) / 255.0))
-    return torch.stack(fr, dim=0).to(device)
 
+    if not fr:
+        raise RuntimeError(f"no se encontraron frames PNG en {carpeta_clip}")
+
+    return torch.stack(fr, dim=0).to(device)
 
 
 def elegir_device(device_str):
     if device_str == "cuda":
         if not torch.cuda.is_available():
-            print("ERROR: device='cuda' pero torch.cuda.is_available()==False",
-                  file=sys.stderr, flush=True)
+            print("ERROR: device='cuda' pero torch.cuda.is_available()==False", file=sys.stderr, flush=True)
             print(f"  torch version: {torch.__version__}", file=sys.stderr)
             print(f"  cuda compiled: {torch.version.cuda}", file=sys.stderr)
             sys.exit(2)
         return torch.device("cuda")
+
     if device_str == "mps":
         if not torch.backends.mps.is_available():
             print("ERROR: device='mps' pero MPS no disponible", file=sys.stderr, flush=True)
             sys.exit(2)
         return torch.device("mps")
+
     if device_str == "cpu":
         return torch.device("cpu")
+
     raise ValueError(f"device desconocido: {device_str!r}")
 
 
-
-def guardar_curva(valores, titulo, ylabel, ruta, xlabel='iteracion'):
+def guardar_curva(valores, titulo, ylabel, ruta, xlabel="iteracion"):
     import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
     ax.plot(valores)
     ax.set_xlabel(xlabel)
@@ -114,6 +153,16 @@ def guardar_curva(valores, titulo, ylabel, ruta, xlabel='iteracion'):
     fig.savefig(ruta)
     plt.close(fig)
 
+
+def _reporte_vacio(n_frames):
+    return {
+        "psnr_por_frame": [None] * n_frames,
+        "psnr_promedio": None,
+        "ssim_por_frame": [None] * n_frames,
+        "ssim_promedio": None,
+        "lpips_por_frame": [None] * n_frames,
+        "lpips_promedio": None,
+    }
 
 
 def main():
@@ -127,8 +176,17 @@ def main():
     with open(args.config) as f:
         config = json.load(f)
 
-    # reproducibilidad
-    seed = config.get("seed", 42)
+    # Flags de debug/performance.
+    calcular_metricas = bool(config.get("calcular_metricas", True))
+    usar_ssim = bool(config.get("usar_ssim", True))
+    usar_lpips = bool(config.get("usar_lpips", False))
+    ejecutar_pruning = bool(config.get("ejecutar_pruning_post", True))
+    calcular_compresion = bool(config.get("calcular_compresion", True))
+    guardar_visualizaciones = bool(config.get("guardar_visualizaciones", True))
+    guardar_gif = bool(config.get("guardar_gif", True))
+    guardar_frames = bool(config.get("guardar_frames_rasterizados", True))
+
+    seed = int(config.get("seed", 42))
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -138,41 +196,34 @@ def main():
     print(f"base: {config['base']}", flush=True)
 
     # === preparar clip ======================================================
-    # Si config tiene `video_mp4`, extraemos los frames automaticamente desde
-    # el mp4 hacia clips/<clip>/ antes de cargar. Si no, asumimos que ya
-    # existe clips/<clip>/ con la secuencia PNG.
     clip = config["clip"]
     carpeta_clip = os.path.join(raiz, "clips", clip)
 
     if config.get("video_mp4"):
         ruta_video = config["video_mp4"]
-        # resolvemos la ruta: si es relativa, es relativa a la raiz tesis_2dgs_video
         if not os.path.isabs(ruta_video):
             ruta_video = os.path.join(raiz, ruta_video)
 
         res = config.get("resolucion_extraccion", [256, 256])
         H_ext, W_ext = int(res[0]), int(res[1])
 
-        n_ext_obj = config.get("n_frames_extraer")           # None = todos
-        fps_ext   = config.get("fps_extraccion")             # None = nativo
-        forzar    = bool(config.get("forzar_extraccion", False))
-
         print(f"=== extrayendo frames del video '{ruta_video}' ===", flush=True)
         n_extraidos = extraer_frames_de_video(
             ruta_mp4=ruta_video,
             carpeta_salida=carpeta_clip,
-            n_frames=n_ext_obj,
-            fps=fps_ext,
-            H=H_ext, W=W_ext,
-            forzar=forzar,
+            n_frames=config.get("n_frames_extraer"),
+            fps=config.get("fps_extraccion"),
+            H=H_ext,
+            W=W_ext,
+            forzar=bool(config.get("forzar_extraccion", False)),
         )
         print(f"  frames disponibles en {carpeta_clip}: {n_extraidos}", flush=True)
 
     if not os.path.isdir(carpeta_clip):
         raise FileNotFoundError(
             f"clip no encontrado: {carpeta_clip}.\n"
-            f"  - O bien colocaste un mp4 en `video/` y agregaste `video_mp4` al config,\n"
-            f"  - o bien existe ya una secuencia PNG en `clips/{clip}/`."
+            f"  - O bien colocaste un mp4 en video/ y agregaste video_mp4 al config,\n"
+            f"  - o bien existe ya una secuencia PNG en clips/{clip}/."
         )
 
     frames = cargar_clip(carpeta_clip, device, max_frames=config.get("max_frames"))
@@ -184,7 +235,7 @@ def main():
     salida = os.path.join(raiz, "resultados", "exp09", nombre_exp, clip)
     os.makedirs(salida, exist_ok=True)
 
-    # === modelo y matrices de la base ======================================
+    # === modelo y matrices ==================================================
     base = config["base"]
     grados = config["grados"]
     grados_distintos = sorted(set(grados.values()))
@@ -195,7 +246,6 @@ def main():
     print(f"matrices ({base}) construidas para grados: {grados_distintos}", flush=True)
 
     usar_frame0_color = bool(config.get("inicializar_color_desde_frame0", True))
-
     frame_init_color = frames[0] if usar_frame0_color else None
 
     modelo = GaussianasPolinomial2D(
@@ -203,7 +253,8 @@ def main():
         n_frames=n_frames,
         grados=grados,
         base=base,
-        H=H, W=W,
+        H=H,
+        W=W,
         device=device,
         escala_inicial_px=config["escala_inicial_px"],
         frame_0_imagen=frame_init_color,
@@ -213,95 +264,132 @@ def main():
 
     optimizer = construir_optimizador(modelo, config["lrs"])
 
-    # === entrenamiento batch-full =========================================
+    # === entrenamiento ======================================================
     print(f"\n=== entrenamiento ({config['n_epochs']} epochs) ===", flush=True)
-    historial = entrenar_batch_full(modelo, frames, matrices_base, optimizer, config,
-                                       carpeta_salida=salida)
+    historial = entrenar_batch_full(modelo, frames, matrices_base, optimizer, config, carpeta_salida=salida)
     t_train = historial["tiempo_total"]
     print(f"entrenamiento listo en {t_train:.1f}s  ({t_train/60:.1f}min)", flush=True)
 
     # === curvas =============================================================
-    guardar_curva(historial["losses_render"], f"loss_render — {nombre_exp}",
-                   "loss render", os.path.join(salida, "loss_curve.png"),
-                   xlabel="epoch")
-    guardar_curva(historial["losses_smooth"], f"loss_smoothness — {nombre_exp}",
-                   "loss smooth", os.path.join(salida, "loss_smooth_curve.png"),
-                   xlabel="epoch")
-    # log csv
-    with open(os.path.join(salida, "log_entrenamiento.csv"), "w", newline='') as f:
-        w = csv.writer(f)
-        w.writerow(["epoch", "loss_render", "loss_smooth", "tiempo_seg"])
+    guardar_curva(historial["losses_render"], f"loss_render - {nombre_exp}",
+                  "loss render", os.path.join(salida, "loss_curve.png"), xlabel="epoch")
+    guardar_curva(historial["losses_smooth"], f"loss_smoothness - {nombre_exp}",
+                  "loss smooth", os.path.join(salida, "loss_smooth_curve.png"), xlabel="epoch")
+
+    with open(os.path.join(salida, "log_entrenamiento.csv"), "w", newline="") as f:
+        w_csv = csv.writer(f)
+        w_csv.writerow(["epoch", "loss_render", "loss_smooth", "tiempo_seg"])
         for i, (lr_, ls_, ts_) in enumerate(zip(
                 historial["losses_render"], historial["losses_smooth"], historial["tiempos_por_epoch"])):
-            w.writerow([i + 1, f"{lr_:.6f}", f"{ls_:.6f}", f"{ts_:.3f}"])
+            w_csv.writerow([i + 1, f"{lr_:.6f}", f"{ls_:.6f}", f"{ts_:.3f}"])
 
-    # checkpoint final pre-pruning
     torch.save({
-        'state_dict_coefs': modelo.state_dict_coefs(),
-        'config': config,
+        "state_dict_coefs": modelo.state_dict_coefs(),
+        "config": config,
     }, os.path.join(salida, "checkpoint_final.pt"))
 
-    # === metricas pre-pruning ===============================================
-    print("\n=== metricas pre-pruning ===", flush=True)
-    render_pre_list = []
-    with torch.no_grad():
-        for j in range(n_frames):
-            params_j = modelo.evaluar_en_frame(j, matrices_base)
-            r = rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
-            render_pre_list.append(r)
-    render_pre = torch.stack(render_pre_list, dim=0)
-    rep_pre = reporte_completo(render_pre, frames, device=device)
-    print(f"  PSNR={rep_pre['psnr_promedio']:.2f}  SSIM={rep_pre['ssim_promedio']:.4f}",
-          flush=True)
+    # === metricas pre-pruning ==============================================
+    render_pre = None
+    if calcular_metricas:
+        print("\n=== metricas pre-pruning ===", flush=True)
+        render_pre = renderizar_clip(modelo, matrices_base, H, W, n_frames, config)
+        rep_pre = reporte_completo(
+            render_pre,
+            frames,
+            device=device,
+            usar_ssim=usar_ssim,
+            usar_lpips=usar_lpips,
+        )
+        print(
+            f"  PSNR={_fmt_metric(rep_pre['psnr_promedio'], 2)}  "
+            f"SSIM={_fmt_metric(rep_pre['ssim_promedio'], 4)}  "
+            f"LPIPS={_fmt_metric(rep_pre['lpips_promedio'], 4)}",
+            flush=True,
+        )
+    else:
+        print("\n=== metricas pre-pruning desactivadas ===", flush=True)
+        rep_pre = _reporte_vacio(n_frames)
 
-    # === pruning post-training ==============================================
-    print("\n=== pruning post-training ===", flush=True)
-    n_orig, n_final, _ = prunear_post(modelo, base,
-                                        umbral=config["umbral_pruning_post"],
-                                        n_samples=200)
-    print(f"  N: {n_orig} -> {n_final}", flush=True)
+    # === pruning post-training =============================================
+    n_orig = modelo.numero_gausianas()
+    if ejecutar_pruning:
+        print("\n=== pruning post-training ===", flush=True)
+        n_orig, n_final, _ = prunear_post(
+            modelo,
+            base,
+            umbral=float(config.get("umbral_pruning_post", 0.05)),
+            n_samples=int(config.get("pruning_n_samples", 200)),
+        )
+        print(f"  N: {n_orig} -> {n_final}", flush=True)
+    else:
+        n_final = n_orig
+        print("\n=== pruning post-training desactivado ===", flush=True)
+        print(f"  N: {n_orig} -> {n_final}", flush=True)
 
-    # render post-pruning
-    render_post_list = []
-    with torch.no_grad():
-        for j in range(n_frames):
-            params_j = modelo.evaluar_en_frame(j, matrices_base)
-            r = rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
-            render_post_list.append(r)
+    # === render post-pruning ===============================================
+    render_post = None
+    reuse_umbral = config.get("reutilizar_render_pre_si_pruning_menor_pct", None)
+    puede_reusar = False
+    if render_pre is not None and reuse_umbral is not None and n_orig > 0:
+        pct_eliminado = (n_orig - n_final) / n_orig
+        puede_reusar = pct_eliminado <= float(reuse_umbral)
 
-    render_post = torch.stack(render_post_list, dim=0)
+    if puede_reusar:
+        print("\n=== render post-pruning reutilizado desde pre-pruning ===", flush=True)
+        render_post = render_pre
+    else:
+        necesita_render_post = calcular_metricas or guardar_frames or guardar_gif or calcular_compresion
+        if necesita_render_post:
+            print("\n=== render post-pruning ===", flush=True)
+            render_post = renderizar_clip(modelo, matrices_base, H, W, n_frames, config)
 
-    # debug de movimiento del render
-    with torch.no_grad():
-        d_0_mid = torch.mean(torch.abs(render_post[0] - render_post[n_frames // 2])).item()
-        d_mid_last = torch.mean(torch.abs(render_post[n_frames // 2] - render_post[-1])).item()
-        d_0_last = torch.mean(torch.abs(render_post[0] - render_post[-1])).item()
+    if render_post is not None:
+        with torch.no_grad():
+            d_0_mid = torch.mean(torch.abs(render_post[0] - render_post[n_frames // 2])).item()
+            d_mid_last = torch.mean(torch.abs(render_post[n_frames // 2] - render_post[-1])).item()
+            d_0_last = torch.mean(torch.abs(render_post[0] - render_post[-1])).item()
 
-    print("\n=== debug movimiento render ===", flush=True)
-    print(f"  diff frame0 vs mid  = {d_0_mid:.6f}", flush=True)
-    print(f"  diff mid vs last    = {d_mid_last:.6f}", flush=True)
-    print(f"  diff frame0 vs last = {d_0_last:.6f}", flush=True)
+        print("\n=== debug movimiento render ===", flush=True)
+        print(f"  diff frame0 vs mid  = {d_0_mid:.6f}", flush=True)
+        print(f"  diff mid vs last    = {d_mid_last:.6f}", flush=True)
+        print(f"  diff frame0 vs last = {d_0_last:.6f}", flush=True)
 
-    rep_post = reporte_completo(render_post, frames, device=device)
-    print(f"  PSNR_post={rep_post['psnr_promedio']:.2f}  SSIM_post={rep_post['ssim_promedio']:.4f}",
-          flush=True)
+    if calcular_metricas and render_post is not None:
+        rep_post = reporte_completo(
+            render_post,
+            frames,
+            device=device,
+            usar_ssim=usar_ssim,
+            usar_lpips=usar_lpips,
+        )
+        print(
+            f"  PSNR_post={_fmt_metric(rep_post['psnr_promedio'], 2)}  "
+            f"SSIM_post={_fmt_metric(rep_post['ssim_promedio'], 4)}  "
+            f"LPIPS_post={_fmt_metric(rep_post['lpips_promedio'], 4)}",
+            flush=True,
+        )
+    else:
+        rep_post = _reporte_vacio(n_frames)
 
     torch.save({
-        'state_dict_coefs': modelo.state_dict_coefs(),
-        'config': config,
-        'metricas_pre': rep_pre,
-        'metricas_post': rep_post,
+        "state_dict_coefs": modelo.state_dict_coefs(),
+        "config": config,
+        "metricas_pre": rep_pre,
+        "metricas_post": rep_post,
     }, os.path.join(salida, "modelo_pruneado.pt"))
 
-    # guardar frames rasterizados (post-pruning) como PNG
-    carpeta_frames_recon = os.path.join(salida, "frames_rasterizados")
-    os.makedirs(carpeta_frames_recon, exist_ok=True)
-    render_np = render_post.detach().clamp(0, 1).cpu().numpy()
-    for j in range(n_frames):
-        Image.fromarray((render_np[j] * 255).astype(np.uint8)).save(
-            os.path.join(carpeta_frames_recon, f"frame_{j:04d}.png"))
+    # === guardar frames rasterizados =======================================
+    render_np = None
+    if guardar_frames and render_post is not None:
+        carpeta_frames_recon = os.path.join(salida, "frames_rasterizados")
+        os.makedirs(carpeta_frames_recon, exist_ok=True)
+        render_np = render_post.detach().clamp(0, 1).cpu().numpy()
+        for j in range(n_frames):
+            Image.fromarray((render_np[j] * 255).astype(np.uint8)).save(
+                os.path.join(carpeta_frames_recon, f"frame_{j:04d}.png")
+            )
 
-    # === metricas de calidad json ==========================================
+    # === metricas de calidad JSON ==========================================
     with open(os.path.join(salida, "metricas_calidad.json"), "w") as f:
         json.dump({
             "exp": nombre_exp,
@@ -311,76 +399,83 @@ def main():
             "resolucion": [H, W],
             "pre_pruning": {
                 "N": n_orig,
-                "psnr_promedio": rep_pre['psnr_promedio'],
-                "ssim_promedio": rep_pre['ssim_promedio'],
-                "lpips_promedio": rep_pre['lpips_promedio'],
-                "psnr_por_frame": rep_pre['psnr_por_frame'],
-                "ssim_por_frame": rep_pre['ssim_por_frame'],
+                "psnr_promedio": rep_pre["psnr_promedio"],
+                "ssim_promedio": rep_pre["ssim_promedio"],
+                "lpips_promedio": rep_pre["lpips_promedio"],
+                "psnr_por_frame": rep_pre["psnr_por_frame"],
+                "ssim_por_frame": rep_pre["ssim_por_frame"],
             },
             "post_pruning": {
                 "N": n_final,
-                "psnr_promedio": rep_post['psnr_promedio'],
-                "ssim_promedio": rep_post['ssim_promedio'],
-                "lpips_promedio": rep_post['lpips_promedio'],
-                "psnr_por_frame": rep_post['psnr_por_frame'],
-                "ssim_por_frame": rep_post['ssim_por_frame'],
+                "psnr_promedio": rep_post["psnr_promedio"],
+                "ssim_promedio": rep_post["ssim_promedio"],
+                "lpips_promedio": rep_post["lpips_promedio"],
+                "psnr_por_frame": rep_post["psnr_por_frame"],
+                "ssim_por_frame": rep_post["ssim_por_frame"],
             },
         }, f, indent=2, default=str)
 
-    # === metricas de compresion (AVIF) =====================================
-    print("\n=== metricas de compresion ===", flush=True)
-    frames_np = (frames.detach().cpu().numpy() * 255).astype(np.uint8)
-    render_np_u8 = (render_np * 255).astype(np.uint8)
-    rep_comp = reporte_compresion(
-        modelo, render_np_u8, frames_np,
-        ruta_video_original=carpeta_clip,
-        calidades_avif=tuple(config.get("calidades_avif", [80, 95])),
-        carpeta_avif_originales=os.path.join(salida, "frames_originales_avif"),
-        carpeta_avif_rasterizados=os.path.join(salida, "frames_rasterizados_avif"),
-    )
-    print(f"  bytes_modelo = {rep_comp['tamano_modelo_bytes']}  "
-          f"({rep_comp['tamano_modelo_kb']:.1f} KiB)", flush=True)
-    print(f"  bytes_video_original = {rep_comp['tamano_video_original_bytes']}", flush=True)
-    if rep_comp.get('avif_disponible', False):
-        for q in config.get("calidades_avif", [80, 95]):
-            sz_o = rep_comp['avif_originales_por_calidad'][q]['total_bytes']
-            sz_r = rep_comp['avif_rasterizados_por_calidad'][q]['total_bytes']
-            print(f"  AVIF q={q}: originales={sz_o} bytes  rasterizados={sz_r} bytes",
-                  flush=True)
-    else:
-        print("  AVIF deshabilitado (pillow-avif-plugin no instalado).", flush=True)
+    # === metricas de compresion ============================================
+    if calcular_compresion:
+        print("\n=== metricas de compresion ===", flush=True)
+        if render_np is None and render_post is not None:
+            render_np = render_post.detach().clamp(0, 1).cpu().numpy()
 
-    with open(os.path.join(salida, "metricas_compresion.json"), "w") as f:
-        json.dump(rep_comp, f, indent=2, default=str)
+        if render_np is None:
+            print("  omitidas: no hay render_post disponible", flush=True)
+        else:
+            frames_np = (frames.detach().cpu().numpy() * 255).astype(np.uint8)
+            render_np_u8 = (render_np * 255).astype(np.uint8)
+            rep_comp = reporte_compresion(
+                modelo,
+                render_np_u8,
+                frames_np,
+                ruta_video_original=carpeta_clip,
+                calidades_avif=tuple(config.get("calidades_avif", [80, 95])),
+                carpeta_avif_originales=os.path.join(salida, "frames_originales_avif"),
+                carpeta_avif_rasterizados=os.path.join(salida, "frames_rasterizados_avif"),
+            )
+            print(f"  bytes_modelo = {rep_comp['tamano_modelo_bytes']}  ({rep_comp['tamano_modelo_kb']:.1f} KiB)", flush=True)
+            print(f"  bytes_video_original = {rep_comp['tamano_video_original_bytes']}", flush=True)
+
+            if rep_comp.get("avif_disponible", False):
+                for q in config.get("calidades_avif", [80, 95]):
+                    sz_o = rep_comp["avif_originales_por_calidad"][q]["total_bytes"]
+                    sz_r = rep_comp["avif_rasterizados_por_calidad"][q]["total_bytes"]
+                    print(f"  AVIF q={q}: originales={sz_o} bytes  rasterizados={sz_r} bytes", flush=True)
+            else:
+                print("  AVIF deshabilitado.", flush=True)
+
+            with open(os.path.join(salida, "metricas_compresion.json"), "w") as f:
+                json.dump(rep_comp, f, indent=2, default=str)
+    else:
+        print("\n=== metricas de compresion desactivadas ===", flush=True)
 
     # === visualizaciones ===================================================
-    print("\n=== visualizaciones ===", flush=True)
-    generar_trayectorias_png(modelo, frames[0], matrices_base,
-                              os.path.join(salida, "trayectorias.png"))
-    generar_heatmap_opacity(modelo, matrices_base,
-                             os.path.join(salida, "heatmap_opacity_temporal.png"))
-    generar_evolucion_parametros(modelo, matrices_base,
-                                  os.path.join(salida, "evolucion_parametros.png"))
-    generar_coeficientes_magnitudes(modelo,
-                                      os.path.join(salida, "coeficientes_magnitudes.png"))
-    import imageio.v2 as imageio
+    if guardar_visualizaciones:
+        print("\n=== visualizaciones ===", flush=True)
+        generar_trayectorias_png(modelo, frames[0], matrices_base, os.path.join(salida, "trayectorias.png"))
+        generar_heatmap_opacity(modelo, matrices_base, os.path.join(salida, "heatmap_opacity_temporal.png"))
+        generar_evolucion_parametros(modelo, matrices_base, os.path.join(salida, "evolucion_parametros.png"))
+        generar_coeficientes_magnitudes(modelo, os.path.join(salida, "coeficientes_magnitudes.png"))
+    else:
+        print("\n=== visualizaciones desactivadas ===", flush=True)
 
-    ruta_gif = os.path.join(salida, "reconstruccion_vs_original.gif")
-    cuadros = []
-    paso = 2
-    factor_diff = 5.0
-
-    frames_np_vis = frames.detach().clamp(0, 1).cpu().numpy()
-    render_np_vis = render_post.detach().clamp(0, 1).cpu().numpy()
-
-    for j in range(0, n_frames, paso):
-        target = frames_np_vis[j]
-        render = render_np_vis[j]
-        diff = np.clip(np.abs(target - render) * factor_diff, 0, 1)
-        concat = np.concatenate([target, render, diff], axis=1)
-        cuadros.append((concat * 255).astype(np.uint8))
-
-    imageio.mimsave(ruta_gif, cuadros, duration=0.066)
+    if guardar_gif:
+        if render_post is None:
+            print("\n=== GIF omitido: no hay render_post disponible ===", flush=True)
+        else:
+            print("\n=== generando GIF desde render_post ===", flush=True)
+            guardar_gif_desde_render(
+                render_post,
+                frames,
+                os.path.join(salida, "reconstruccion_vs_original.gif"),
+                paso=int(config.get("gif_paso", 2)),
+                factor_diff=float(config.get("gif_factor_diff", 5.0)),
+                duracion=float(config.get("gif_duracion", 0.066)),
+            )
+    else:
+        print("\n=== GIF desactivado ===", flush=True)
 
     print(f"\nlisto. resultados en: {salida}", flush=True)
 

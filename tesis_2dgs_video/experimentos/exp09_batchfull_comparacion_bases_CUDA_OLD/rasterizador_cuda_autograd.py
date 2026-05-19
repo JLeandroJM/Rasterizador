@@ -14,10 +14,8 @@ RAIZ_RASTERIZADOR = os.path.abspath(
     os.path.join(AQUI, "..", "..", "..")
 )
 
-RUTA_RASTER_CUDA = os.environ.get(
-    "RUTA_RASTER_CUDA",
-    os.path.join(RAIZ_RASTERIZADOR, "raster_cuda_new")
-)
+RUTA_RASTER_CUDA = os.path.join(RAIZ_RASTERIZADOR, "raster_cuda")
+
 print(f"[rasterizador_cuda_autograd] buscando raster_cuda en: {RUTA_RASTER_CUDA}", flush=True)
 
 if not os.path.isdir(RUTA_RASTER_CUDA):

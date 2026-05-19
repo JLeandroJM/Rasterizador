@@ -3,29 +3,21 @@ import sys
 import math
 import torch
 
-_YA_IMPRIMIO_PREPROCESS = False
-_YA_IMPRIMIO_CONIC = False
-_YA_IMPRIMIO_GRAD_CONIC = False
-
 AQUI = os.path.dirname(os.path.abspath(__file__))
 
 RAIZ_RASTERIZADOR = os.path.abspath(
     os.path.join(AQUI, "..", "..", "..")
 )
 
-RUTA_RASTER_CUDA = os.environ.get(
-    "RUTA_RASTER_CUDA",
-    os.path.join(RAIZ_RASTERIZADOR, "raster_cuda_new")
-)
+RUTA_RASTER_CUDA = os.path.join(RAIZ_RASTERIZADOR, "raster_cuda")
 
 print(f"[rasterizador_cuda_tiled_autograd] buscando raster_cuda en: {RUTA_RASTER_CUDA}", flush=True)
 
 if not os.path.isdir(RUTA_RASTER_CUDA):
     raise FileNotFoundError(f"No existe la carpeta raster_cuda: {RUTA_RASTER_CUDA}")
 
-# Append para no tapar los wrappers del experimento.
 if RUTA_RASTER_CUDA not in sys.path:
-    sys.path.append(RUTA_RASTER_CUDA)
+    sys.path.insert(0, RUTA_RASTER_CUDA)
 
 try:
     import raster_cuda
@@ -34,7 +26,6 @@ except Exception as e:
     for p in sys.path[:8]:
         print("  ", p, flush=True)
     raise e
-
 
 def construir_conic(scale, theta):
     sx = scale[:, 0]
@@ -150,6 +141,7 @@ def calcular_tiles_tocados_gpu(mu, scale, theta, depth, H, W, tile_size=16, k_si
 
     tile_ids = ty * tiles_x + tx
 
+    # Normalizamos depth para ordenar dentro de cada tile.
     depth_vals = depth[gaussian_ids]
     d_min = depth_vals.min()
     d_max = depth_vals.max()
@@ -199,51 +191,18 @@ class RasterizarTiledCUDA(torch.autograd.Function):
         color_c = color.contiguous()
         depth_c = depth.contiguous()
 
-        global _YA_IMPRIMIO_CONIC
-        if hasattr(raster_cuda, "build_conic"):
-            if not _YA_IMPRIMIO_CONIC:
-                print("[tiled] usando build_conic CUDA/C++", flush=True)
-                _YA_IMPRIMIO_CONIC = True
-            conic = raster_cuda.build_conic(scale_c, theta_c)
-        else:
-            if not _YA_IMPRIMIO_CONIC:
-                print("[tiled] usando build_conic PyTorch fallback", flush=True)
-                _YA_IMPRIMIO_CONIC = True
-            conic = construir_conic(scale_c, theta_c)
+        conic = construir_conic(scale_c, theta_c)
 
-        usar_preprocess_cuda = os.environ.get("USAR_PREPROCESS_TILED_CUDA", "1") == "1"
-
-        global _YA_IMPRIMIO_PREPROCESS
-        if usar_preprocess_cuda and hasattr(raster_cuda, "preprocess_tiled"):
-            if not _YA_IMPRIMIO_PREPROCESS:
-                print("[tiled] usando preprocess CUDA/C++", flush=True)
-                _YA_IMPRIMIO_PREPROCESS = True
-
-            gaussian_ids, ranges = raster_cuda.preprocess_tiled(
-                mu_c,
-                scale_c,
-                theta_c,
-                depth_c,
-                H,
-                W,
-                tile_size,
-                k_sigma
-            )
-        else:
-            if not _YA_IMPRIMIO_PREPROCESS:
-                print("[tiled] usando preprocess PyTorch fallback", flush=True)
-                _YA_IMPRIMIO_PREPROCESS = True
-
-            gaussian_ids, ranges = calcular_tiles_tocados_gpu(
-                mu_c,
-                scale_c,
-                theta_c,
-                depth_c,
-                H,
-                W,
-                tile_size=tile_size,
-                k_sigma=k_sigma
-            )
+        gaussian_ids, ranges = calcular_tiles_tocados_gpu(
+            mu_c,
+            scale_c,
+            theta_c,
+            depth_c,
+            H,
+            W,
+            tile_size=tile_size,
+            k_sigma=k_sigma
+        )
 
         render, final_Ts, n_contrib = raster_cuda.forward_tiled_train(
             mu_c,
@@ -305,25 +264,11 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             ctx.tile_size
         )
 
-        global _YA_IMPRIMIO_GRAD_CONIC
-        if hasattr(raster_cuda, "grad_conic_to_scale_theta"):
-            if not _YA_IMPRIMIO_GRAD_CONIC:
-                print("[tiled] usando grad_conic_to_scale_theta CUDA/C++", flush=True)
-                _YA_IMPRIMIO_GRAD_CONIC = True
-            grad_scale, grad_theta = raster_cuda.grad_conic_to_scale_theta(
-                scale,
-                theta,
-                grad_conic
-            )
-        else:
-            if not _YA_IMPRIMIO_GRAD_CONIC:
-                print("[tiled] usando grad_conic_to_scale_theta PyTorch fallback", flush=True)
-                _YA_IMPRIMIO_GRAD_CONIC = True
-            grad_scale, grad_theta = grad_conic_a_scale_theta(
-                scale,
-                theta,
-                grad_conic
-            )
+        grad_scale, grad_theta = grad_conic_a_scale_theta(
+            scale,
+            theta,
+            grad_conic
+        )
 
         return (
             grad_mu,
@@ -338,15 +283,16 @@ class RasterizarTiledCUDA(torch.autograd.Function):
             None
         )
 
-
 def rasterizar_un_frame_cuda_tiled(params_frame, H, W, tile_size=16, k_sigma=3.5):
-    # El preprocess CUDA ya ordena por tile + depth.
-    mu = params_frame["mu"].contiguous()
-    scale = params_frame["scale"].contiguous()
-    theta = params_frame["theta"].contiguous()
-    opacity = params_frame["opacity"].contiguous()
-    color = params_frame["color"].contiguous()
-    depth = params_frame["depth"].contiguous()
+    depth = params_frame["depth"]
+    idx = torch.argsort(depth)
+
+    mu = params_frame["mu"][idx].contiguous()
+    scale = params_frame["scale"][idx].contiguous()
+    theta = params_frame["theta"][idx].contiguous()
+    opacity = params_frame["opacity"][idx].contiguous()
+    color = params_frame["color"][idx].contiguous()
+    depth_o = depth[idx].contiguous()
 
     return RasterizarTiledCUDA.apply(
         mu,
@@ -354,7 +300,7 @@ def rasterizar_un_frame_cuda_tiled(params_frame, H, W, tile_size=16, k_sigma=3.5
         theta,
         opacity,
         color,
-        depth,
+        depth_o,
         H,
         W,
         tile_size,

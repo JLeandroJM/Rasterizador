@@ -1,6 +1,6 @@
 {
-    "nombre_experimento": "exp09_chebyshev",
-    "base": "chebyshev",
+    "nombre_experimento": "exp09_monomial",
+    "base": "monomial",
 
     "video_mp4": null,
     "n_frames_extraer": null,

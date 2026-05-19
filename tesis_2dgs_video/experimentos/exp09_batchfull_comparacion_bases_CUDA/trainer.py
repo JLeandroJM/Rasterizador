@@ -1,36 +1,13 @@
 """
-Loop de entrenamiento epoch-based con "batch full" via GRADIENT ACCUMULATION.
+Loop de entrenamiento epoch-based con gradient accumulation.
 
-DECISION (manejo de memoria - importante):
-------------------------------------------
-"Batch full" en la teoria significa: loss promediado sobre TODOS los frames
-en una sola pasada -> 1 step de optimizer por epoch. En la practica con un
-clip de 90 frames y N=1000 gaussianas a 256x256, construir el grafo completo
-de autograd para todos los frames simultaneamente requiere ~50 GB de VRAM,
-imposible en una 4050 con 6 GB.
-
-Implementacion equivalente con memoria de un solo frame:
-    optimizer.zero_grad()
-    para j en 0..n_frames-1:
-        params_j = modelo.evaluar_en_frame(j)
-        render_j = rasterizar(params_j)
-        loss_j   = loss_render(render_j, frames[j]) / n_frames
-        loss_j.backward()        <-- acumula grad en cada Parameter
-    loss_s = beta * loss_smoothness(modelo); loss_s.backward()
-    optimizer.step()
-
-Esto es matematicamente identico a:
-    loss = mean_j L_j + beta * L_smooth
-    loss.backward()
-    optimizer.step()
-porque el gradiente es lineal. Memoria pico = 1 frame.
-
-Si la GPU es grande (12+ GB), se puede usar sub_batch_frames > 1 para mejor
-throughput (autograd hace mejor uso de la GPU con batches mas grandes).
-Default: sub_batch_frames=1.
+Cambios de rendimiento:
+- Flags para desactivar PSNR durante training.
+- Flags para no guardar checkpoints intermedios ni verificacion visual.
+- Verificacion visual usa el mismo rasterizador del config si se activa.
+- Opcion frames_por_epoch para debug/entrenamiento rapido con subset temporal.
 """
 import os
-import sys
 import time
 
 import torch
@@ -52,191 +29,216 @@ except Exception as e:
     print(f"[trainer] CUDA tiled no disponible: {e}", flush=True)
     _CUDA_TILED_DISPONIBLE = False
 
+
 def _psnr(a, b):
     mse = torch.mean((a - b) ** 2)
     if mse <= 0:
-        return float('inf')
+        return float("inf")
     return float(-10.0 * torch.log10(mse))
 
 
-
-@torch.no_grad()
-def _evaluar_psnr_promedio(modelo, frames, matrices_base):
-    """PSNR promedio sobre todos los frames (no diferenciable)."""
-    n_frames, H, W, _ = frames.shape
-    suma = 0.0
-    for j in range(n_frames):
-        params_j = modelo.evaluar_en_frame(j, matrices_base)
-        r = rasterizar_un_frame(params_j, H, W).clamp(0, 1)
-        suma += _psnr(r, frames[j])
-    return suma / n_frames
-
-
-
-def entrenar_batch_full(modelo, frames, matrices_base, optimizer, config,
-                         carpeta_salida=None):
-    """
-    Args:
-        modelo         : GaussianasPolinomial2D
-        frames         : (n_frames, H, W, 3) en [0, 1] ya en device
-        matrices_base  : dict {grado: B}
-        optimizer      : Adam con param_groups
-        config         : dict
-        carpeta_salida : str opcional, donde guardar checkpoints y verificaciones
-
-    Returns dict con:
-        losses_por_epoch_render, losses_por_epoch_smooth, losses_por_epoch_total
-        psnrs_promedio_por_epoch (cada checkpoint_cada_n_epochs)
-        tiempo_por_epoch
-        tiempo_total
-    """
-    n_frames, H, W, _ = frames.shape
-    n_epochs       = config["n_epochs"]
-    beta           = config["beta_smoothness"]
-    pesos_smooth   = config.get("pesos_smoothness", None)
-    chk_each       = config.get("checkpoint_cada_n_epochs", 50)
-    lambda_dssim   = config.get("lambda_dssim", 0.2)
-    sub_batch_fr   = config.get("sub_batch_frames", 1)   # 1 = un frame por backward
-    early_plateau  = config.get("early_stop_plateau", None)  # opcional
-
+def _rasterizar_segun_config(params_j, H, W, config):
     usar_cuda_conic = bool(config.get("usar_cuda_conic", False))
     usar_cuda_tiled = bool(config.get("usar_cuda_tiled", False))
-
-    tile_size = int(config.get("cuda_tile_size", 16))
-    k_sigma = float(config.get("cuda_k_sigma", 3.5))
 
     if usar_cuda_conic and usar_cuda_tiled:
         raise RuntimeError("No puedes usar usar_cuda_conic=true y usar_cuda_tiled=true al mismo tiempo")
 
     if usar_cuda_tiled:
         if not _CUDA_TILED_DISPONIBLE:
-            raise RuntimeError("config usa usar_cuda_tiled=true, pero no se pudo importar rasterizador_cuda_tiled_autograd")
-        print(
-            f"[trainer] usando rasterizador CUDA tiled diferenciable "
-            f"(tile={tile_size}, k_sigma={k_sigma})",
-            flush=True
+            raise RuntimeError("usar_cuda_tiled=true, pero rasterizador_cuda_tiled_autograd no esta disponible")
+        return rasterizar_un_frame_cuda_tiled(
+            params_j,
+            H,
+            W,
+            tile_size=int(config.get("cuda_tile_size", 16)),
+            k_sigma=float(config.get("cuda_k_sigma", 3.5)),
         )
+
+    if usar_cuda_conic:
+        if not _CUDA_CONIC_DISPONIBLE:
+            raise RuntimeError("usar_cuda_conic=true, pero rasterizador_cuda_autograd no esta disponible")
+        return rasterizar_un_frame_cuda_conic(params_j, H, W)
+
+    return rasterizar_un_frame(params_j, H, W)
+
+
+@torch.no_grad()
+def _evaluar_psnr_promedio(modelo, frames, matrices_base, config):
+    """PSNR promedio. Usa el rasterizador indicado por config."""
+    n_frames, H, W, _ = frames.shape
+    suma = 0.0
+    for j in range(n_frames):
+        params_j = modelo.evaluar_en_frame(j, matrices_base)
+        r = _rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
+        suma += _psnr(r, frames[j])
+    return suma / n_frames
+
+
+def _indices_epoch(n_frames, frames_por_epoch, device):
+    """
+    Devuelve los indices de frames a usar en un epoch.
+    Si frames_por_epoch es None, usa todos los frames.
+    """
+    if frames_por_epoch is None:
+        return list(range(n_frames))
+
+    k = int(frames_por_epoch)
+    if k <= 0 or k >= n_frames:
+        return list(range(n_frames))
+
+    # randperm en CPU para que .tolist() sea barato y no sincronice tanto.
+    return torch.randperm(n_frames, device="cpu")[:k].tolist()
+
+
+def entrenar_batch_full(modelo, frames, matrices_base, optimizer, config, carpeta_salida=None):
+    """
+    Entrena el modelo con gradient accumulation.
+
+    Flags utiles en config:
+        calcular_psnr_durante_training: bool
+        guardar_checkpoints_intermedios: bool
+        guardar_verificacion_visual: bool
+        frames_por_epoch: int | null
+    """
+    n_frames, H, W, _ = frames.shape
+    n_epochs = int(config["n_epochs"])
+    beta = float(config["beta_smoothness"])
+    pesos_smooth = config.get("pesos_smoothness", None)
+    chk_each = int(config.get("checkpoint_cada_n_epochs", 50))
+    lambda_dssim = float(config.get("lambda_dssim", 0.2))
+    sub_batch_fr = int(config.get("sub_batch_frames", 1))
+    early_plateau = config.get("early_stop_plateau", None)
+
+    usar_cuda_conic = bool(config.get("usar_cuda_conic", False))
+    usar_cuda_tiled = bool(config.get("usar_cuda_tiled", False))
+    tile_size = int(config.get("cuda_tile_size", 16))
+    k_sigma = float(config.get("cuda_k_sigma", 3.5))
+
+    calcular_psnr = bool(config.get("calcular_psnr_durante_training", False))
+    guardar_ckpts = bool(config.get("guardar_checkpoints_intermedios", False))
+    guardar_verif = bool(config.get("guardar_verificacion_visual", False))
+    frames_por_epoch = config.get("frames_por_epoch", None)
+
+    if usar_cuda_conic and usar_cuda_tiled:
+        raise RuntimeError("No puedes usar usar_cuda_conic=true y usar_cuda_tiled=true al mismo tiempo")
+
+    if usar_cuda_tiled:
+        if not _CUDA_TILED_DISPONIBLE:
+            raise RuntimeError("config usa usar_cuda_tiled=true, pero CUDA tiled no esta disponible")
+        print(f"[trainer] usando rasterizador CUDA tiled diferenciable (tile={tile_size}, k_sigma={k_sigma})", flush=True)
     elif usar_cuda_conic:
         if not _CUDA_CONIC_DISPONIBLE:
-            raise RuntimeError("config usa usar_cuda_conic=true, pero no se pudo importar rasterizador_cuda_autograd")
+            raise RuntimeError("config usa usar_cuda_conic=true, pero CUDA conic no esta disponible")
         print("[trainer] usando rasterizador CUDA conic diferenciable", flush=True)
     else:
         print("[trainer] usando rasterizador PyTorch original", flush=True)
-    
+
+    if frames_por_epoch is not None:
+        print(f"[trainer] modo frames_por_epoch={frames_por_epoch} (subset temporal por epoch)", flush=True)
+
     losses_render = []
     losses_smooth = []
-    losses_total  = []
-    psnrs_chk     = []
-    tiempos       = []
+    losses_total = []
+    psnrs_chk = []
+    tiempos = []
 
     plateau_count = 0
-    mejor_loss = float('inf')
-
+    mejor_loss = float("inf")
     t_inicio = time.time()
+
     for epoch in range(n_epochs):
         t_epoch = time.time()
-
-        # === FORWARD/BACKWARD con gradient accumulation =====================
         optimizer.zero_grad()
 
+        idx_epoch = _indices_epoch(n_frames, frames_por_epoch, frames.device)
+        n_usados = len(idx_epoch)
         loss_render_epoch_total = 0.0
-        # acumulamos en sub-batches de frames
-        for inicio in range(0, n_frames, sub_batch_fr):
-            fin = min(inicio + sub_batch_fr, n_frames)
 
+        for inicio in range(0, n_usados, sub_batch_fr):
+            sub_indices = idx_epoch[inicio:inicio + sub_batch_fr]
             loss_sub = None
-            for j in range(inicio, fin):
+
+            for j in sub_indices:
                 params_j = modelo.evaluar_en_frame(j, matrices_base)
-
-                if usar_cuda_tiled:
-                    render_j = rasterizar_un_frame_cuda_tiled(
-                        params_j,
-                        H,
-                        W,
-                        tile_size=tile_size,
-                        k_sigma=k_sigma
-                    )
-                elif usar_cuda_conic:
-                    render_j = rasterizar_un_frame_cuda_conic(params_j, H, W)
-                else:
-                    render_j = rasterizar_un_frame(params_j, H, W)
-
+                render_j = _rasterizar_segun_config(params_j, H, W, config)
                 l_j = loss_render_frame(render_j, frames[j], lambda_dssim=lambda_dssim)
-                # dividimos por n_frames para que el gradiente acumulado sea
-                # exactamente el de la media (equivalente a batch full).
-                l_j = l_j / n_frames
+
+                # Promedio sobre los frames realmente usados en este epoch.
+                l_j = l_j / n_usados
                 loss_sub = l_j if loss_sub is None else (loss_sub + l_j)
 
-            loss_sub.backward()
-            loss_render_epoch_total += float(loss_sub.detach().item()) * n_frames / (fin - inicio)
-            # ^ desnormalizamos solo para reportar la loss "como si fuera mean"
+            if loss_sub is not None:
+                loss_sub.backward()
+                loss_render_epoch_total += float(loss_sub.detach().item()) * n_usados
 
-        # loss render promediado sobre el epoch
-        loss_render_avg = loss_render_epoch_total / (n_frames / max(1, sub_batch_fr))
+        loss_render_avg = loss_render_epoch_total / max(1, n_usados)
 
-        # === smoothness ====================================================
         loss_smooth = loss_smoothness(modelo, pesos_por_param=pesos_smooth)
         loss_smooth_escalado = beta * loss_smooth
-        loss_smooth_escalado.backward()
+        # Para imagenes estaticas o beta_smoothness=0, smoothness puede no tener gradiente.
+        if loss_smooth_escalado.requires_grad and beta != 0.0:
+            loss_smooth_escalado.backward()
 
-        # === step ==========================================================
         optimizer.step()
 
-        # === logging =======================================================
         loss_render_reportado = float(loss_render_avg)
         loss_smooth_reportado = float(loss_smooth.detach().item())
-        loss_total_reportado  = loss_render_reportado + beta * loss_smooth_reportado
+        loss_total_reportado = loss_render_reportado + beta * loss_smooth_reportado
 
         losses_render.append(loss_render_reportado)
         losses_smooth.append(loss_smooth_reportado)
         losses_total.append(loss_total_reportado)
         tiempos.append(time.time() - t_epoch)
 
-        # checkpoint y log detallado
         es_checkpoint = (epoch + 1) % chk_each == 0 or epoch == 0 or epoch == n_epochs - 1
+
         if es_checkpoint:
-            #psnr_avg = _evaluar_psnr_promedio(modelo, frames, matrices_base)
-            psnr_avg = -1.0
+            if calcular_psnr:
+                psnr_avg = _evaluar_psnr_promedio(modelo, frames, matrices_base, config)
+            else:
+                psnr_avg = -1.0
 
             psnrs_chk.append((epoch, psnr_avg))
 
             t_corrido = time.time() - t_inicio
             t_promedio = t_corrido / (epoch + 1)
             eta = t_promedio * (n_epochs - epoch - 1)
-            print(f"  epoch {epoch+1:4d}/{n_epochs}  "
-                  f"loss_r={loss_render_reportado:.5f}  "
-                  f"loss_s={loss_smooth_reportado:.3e}  "
-                  f"PSNR_avg={psnr_avg:.2f}  "
-                  f"t_epoch={tiempos[-1]:.1f}s  "
-                  f"eta={eta/60:.1f}min",
-                  flush=True)
+            print(
+                f"  epoch {epoch+1:4d}/{n_epochs}  "
+                f"loss_r={loss_render_reportado:.5f}  "
+                f"loss_s={loss_smooth_reportado:.3e}  "
+                f"PSNR_avg={psnr_avg:.2f}  "
+                f"t_epoch={tiempos[-1]:.1f}s  "
+                f"eta={eta/60:.1f}min",
+                flush=True,
+            )
 
-            if carpeta_salida is not None:
-                # checkpoint pesado
+            if carpeta_salida is not None and guardar_ckpts:
                 torch.save({
-                    'state_dict_coefs': modelo.state_dict_coefs(),
-                    'optimizer_state': optimizer.state_dict(),
-                    'epoch_completado': epoch + 1,
-                    'config': config,
+                    "state_dict_coefs": modelo.state_dict_coefs(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "epoch_completado": epoch + 1,
+                    "config": config,
                 }, os.path.join(carpeta_salida, f"checkpoint_epoch{epoch+1:04d}.pt"))
 
-                # verificacion visual: renderizar y guardar primer y ultimo frame
-                #_guardar_verificacion_visual(modelo, frames, matrices_base,
-                #                              carpeta_salida, epoch + 1)
+            if carpeta_salida is not None and guardar_verif:
+                _guardar_verificacion_visual(modelo, frames, matrices_base, carpeta_salida, epoch + 1, config)
+
         else:
-            # log minimo para no spamear
             if (epoch + 1) % max(1, chk_each // 5) == 0:
                 t_corrido = time.time() - t_inicio
                 t_promedio = t_corrido / (epoch + 1)
                 eta = t_promedio * (n_epochs - epoch - 1)
-                print(f"  epoch {epoch+1:4d}/{n_epochs}  "
-                      f"loss_r={loss_render_reportado:.5f}  "
-                      f"loss_s={loss_smooth_reportado:.3e}  "
-                      f"t_epoch={tiempos[-1]:.1f}s  "
-                      f"eta={eta/60:.1f}min",
-                      flush=True)
+                print(
+                    f"  epoch {epoch+1:4d}/{n_epochs}  "
+                    f"loss_r={loss_render_reportado:.5f}  "
+                    f"loss_s={loss_smooth_reportado:.3e}  "
+                    f"t_epoch={tiempos[-1]:.1f}s  "
+                    f"eta={eta/60:.1f}min",
+                    flush=True,
+                )
 
-        # early stop si la loss esta en plateau
         if early_plateau is not None:
             if loss_total_reportado < mejor_loss - 1e-6:
                 mejor_loss = loss_total_reportado
@@ -248,20 +250,18 @@ def entrenar_batch_full(modelo, frames, matrices_base, optimizer, config,
                 break
 
     return {
-        'losses_render': losses_render,
-        'losses_smooth': losses_smooth,
-        'losses_total':  losses_total,
-        'psnrs_chk':     psnrs_chk,
-        'tiempos_por_epoch': tiempos,
-        'tiempo_total':  time.time() - t_inicio,
+        "losses_render": losses_render,
+        "losses_smooth": losses_smooth,
+        "losses_total": losses_total,
+        "psnrs_chk": psnrs_chk,
+        "tiempos_por_epoch": tiempos,
+        "tiempo_total": time.time() - t_inicio,
     }
 
 
-
 @torch.no_grad()
-@torch.no_grad()
-def _guardar_verificacion_visual(modelo, frames, matrices_base, carpeta, epoch):
-    """Renderiza primer y ultimo frame y los guarda como PNG."""
+def _guardar_verificacion_visual(modelo, frames, matrices_base, carpeta, epoch, config):
+    """Renderiza primer y ultimo frame usando el rasterizador del config."""
     from PIL import Image
     import numpy as np
 
@@ -271,7 +271,7 @@ def _guardar_verificacion_visual(modelo, frames, matrices_base, carpeta, epoch):
 
     for nombre, j in [("primer", 0), ("ultimo", n_frames - 1)]:
         params_j = modelo.evaluar_en_frame(j, matrices_base)
-        r = rasterizar_un_frame(params_j, H, W).clamp(0, 1)
+        r = _rasterizar_segun_config(params_j, H, W, config).clamp(0, 1)
 
         if torch.is_tensor(r):
             r = r.detach().cpu().numpy()
@@ -279,5 +279,3 @@ def _guardar_verificacion_visual(modelo, frames, matrices_base, carpeta, epoch):
         Image.fromarray((r * 255).astype(np.uint8)).save(
             os.path.join(sub, f"epoch{epoch:04d}_{nombre}_frame.png")
         )
-
-        

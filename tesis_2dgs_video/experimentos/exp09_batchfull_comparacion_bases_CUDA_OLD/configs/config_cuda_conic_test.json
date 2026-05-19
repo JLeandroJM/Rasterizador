@@ -1,11 +1,11 @@
 {
-  "nombre_experimento": "exp09_cuda_tiled_DUMMY",
+  "nombre_experimento": "exp09_cuda_conic_test",
   "clip": "rockyourbody_clips",
-  "max_frames": 50,
+  "max_frames": 20,
   "device": "cuda",
   "base": "chebyshev",
 
-  "n_gaussianas_inicial": 500,
+  "n_gaussianas_inicial": 100,
 
   "grados": {
     "mu": 4,
@@ -24,10 +24,7 @@
   "lambda_dssim": 0.0,
   "beta_smoothness": 0.00001,
 
-  "usar_cuda_conic": false,
-  "usar_cuda_tiled": true,
-  "cuda_tile_size": 16,
-  "cuda_k_sigma": 6.0,
+  "usar_cuda_conic": true,
 
   "lrs": {
     "mu_a0": 0.001,
@@ -53,7 +50,7 @@
     "depth": 1.0
   },
 
-  "checkpoint_cada_n_epochs": 10,
+  "checkpoint_cada_n_epochs": 1,
   "umbral_pruning_post": 0.03,
   "calidades_avif": [80]
 }
